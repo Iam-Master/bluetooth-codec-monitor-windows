@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Compile-check Python backend
+        run: |
+          python -m py_compile backend/monitor.py backend/app.py
+
+      - name: Smoke-import backend
+        working-directory: backend
+        run: python -c "import monitor; print('monitor.py imports cleanly')"
+
+      - name: Validate codec_info.json
+        run: python -c "import json; json.load(open('backend/codec_info.json', encoding='utf-8')); print('codec_info.json is valid JSON')"
+
+      - name: Syntax-check frontend JS
+        run: node --check frontend/app.js
+
+      - name: Validate PyInstaller spec syntax
+        run: python -m py_compile backend/codec_monitor.spec

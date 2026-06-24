@@ -1,0 +1,30 @@
+# Dependencies
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# User data (auto-created at runtime)
+backend/history.db
+backend/settings.json
+backend/device_photos/*
+!backend/device_photos/.gitkeep
+
+# Test artifacts
+backend/test_export_output.csv
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.stackdump
+*.log

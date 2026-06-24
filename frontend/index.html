@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codec Monitor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.16.0/dist/tabler-icons.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-theme="light">
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <button class="menu-btn" id="sidebar-toggle"><i class="ti ti-menu-2" aria-hidden="true"></i></button>
+        <div class="brand-logo">
+          <i class="ti ti-waveform" aria-hidden="true"></i>
+          <span>Codec Monitor</span>
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-page="dashboard">
+          <i class="ti ti-layout-dashboard" aria-hidden="true"></i>
+          <span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-page="outputs">
+          <i class="ti ti-speakerphone" aria-hidden="true"></i>
+          <span>Audio Outputs</span>
+        </button>
+        <button class="nav-item" data-page="devices">
+          <i class="ti ti-devices" aria-hidden="true"></i>
+          <span>Devices</span>
+        </button>
+        <button class="nav-item" data-page="codecs">
+          <i class="ti ti-grid-dots" aria-hidden="true"></i>
+          <span>Codecs</span>
+        </button>
+        <button class="nav-item" data-page="statistics">
+          <i class="ti ti-chart-line" aria-hidden="true"></i>
+          <span>Statistics</span>
+        </button>
+        <button class="nav-item" data-page="alerts">
+          <i class="ti ti-bell" aria-hidden="true"></i>
+          <span>Alerts</span>
+        </button>
+        <button class="nav-item" data-page="settings">
+          <i class="ti ti-settings" aria-hidden="true"></i>
+          <span>Settings</span>
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="sys-health">
+          <span class="sys-health-dot" id="sys-health-dot"></span>
+          <div>
+            <p class="sys-health-title" id="sys-health-title">Connecting&hellip;</p>
+            <p class="sys-health-sub" id="sys-health-sub">&nbsp;</p>
+          </div>
+        </div>
+        <button class="nav-item" id="help-btn">
+          <i class="ti ti-help-circle" aria-hidden="true"></i>
+          <span>Help &amp; Support</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main-col">
+      <header class="topbar">
+        <h1 class="page-title" id="page-title">Dashboard</h1>
+        <div class="top-right">
+          <button class="icon-btn" id="alert-sound-btn" title="Toggle alert sound">
+            <i class="ti ti-volume" aria-hidden="true"></i>
+          </button>
+          <button class="icon-btn" id="settings-shortcut-btn" title="Settings">
+            <i class="ti ti-settings" aria-hidden="true"></i>
+          </button>
+          <div class="theme2" role="radiogroup" aria-label="Color theme">
+            <button data-theme="light" class="on" title="Light"><i class="ti ti-sun" aria-hidden="true"></i></button>
+            <button data-theme="dark" title="Dark"><i class="ti ti-moon" aria-hidden="true"></i></button>
+          </div>
+        </div>
+      </header>
+
+      <main class="pages">
+
+        <section class="page active" id="page-dashboard">
+          <div class="grid-top">
+            <section class="card">
+              <div class="card-inner">
+                <div class="photo" id="dev-photo" aria-hidden="true"></div>
+                <div class="card-text">
+                  <h2 id="dev-name">Detecting&hellip;</h2>
+                  <p class="sub" id="dev-meta">Waiting for backend</p>
+                  <div class="pills" id="dev-pills"></div>
+                </div>
+              </div>
+            </section>
+            <section class="card">
+              <div class="card-inner vertical">
+                <div class="card-row-header"><p class="lbl">Battery</p><i class="ti ti-battery-3" aria-hidden="true"></i></div>
+                <p class="val big" id="m-battery">&mdash;</p>
+                <p class="sub" id="battery-sub">&nbsp;</p>
+                <div class="battery-bar"><div class="battery-bar-fill" id="battery-bar-fill"></div></div>
+              </div>
+            </section>
+            <section class="card">
+              <div class="card-inner vertical">
+                <div class="card-row-header"><p class="lbl">Connected for</p><i class="ti ti-clock" aria-hidden="true"></i></div>
+                <p class="val big mono" id="m-uptime">00:00:00</p>
+                <p class="sub" id="uptime-since">&nbsp;</p>
+              </div>
+            </section>
+          </div>
+
+          <div class="grid-perf">
+            <section class="card perf-card">
+              <div class="card-row-header"><p class="lbl"><i class="ti ti-activity" aria-hidden="true"></i> Performance overview</p></div>
+              <div class="perf-grid">
+                <div class="perf-tile">
+                  <p class="lbl">Transmission speed</p>
+                  <p class="val"><span id="pf-bitrate">&mdash;</span> <span class="unit">kbps</span></p>
+                  <svg class="sparkline" id="pf-sparkline" viewBox="0 0 100 24" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="perf-tile">
+                  <p class="lbl">Sample rate</p>
+                  <p class="val"><span id="pf-srate">&mdash;</span> <span class="unit">kHz</span></p>
+                  <p class="sub" id="pf-depth-sub">&nbsp;</p>
+                </div>
+                <div class="perf-tile">
+                  <p class="lbl">Estimated latency</p>
+                  <p class="val"><span id="pf-latency">&mdash;</span> <span class="unit">ms</span></p>
+                  <p class="sub" id="pf-latency-label">&nbsp;</p>
+                </div>
+                <div class="perf-tile">
+                  <p class="lbl">Connection stability</p>
+                  <p class="val sm" id="pf-stability">&mdash;</p>
+                  <p class="sub" id="pf-stability-sub">&nbsp;</p>
+                </div>
+              </div>
+            </section>
+            <section class="card timeline-card">
+              <div class="card-row-header">
+                <p class="lbl"><i class="ti ti-clock-hour-4" aria-hidden="true"></i> Session timeline</p>
+                <select id="range-select" aria-label="Time range">
+                  <option value="10m">Last 10 minutes</option>
+                  <option value="30m">Last 30 minutes</option>
+                  <option value="1h">Last hour</option>
+                  <option value="6h">Last 6 hours</option>
+                  <option value="24h">Last 24 hours</option>
+                  <option value="all">All recorded</option>
+                </select>
+              </div>
+              <div class="chart-wrap"><canvas id="dash-chart"></canvas></div>
+              <p class="legend-line"><span class="legend-dot"></span>Transmission speed (kbps)</p>
+            </section>
+          </div>
+
+          <div class="grid3">
+            <section class="card">
+              <div class="card-inner vertical"><p class="lbl">Output type</p><p class="val sm" id="m-type">&mdash;</p></div>
+            </section>
+            <section class="card">
+              <div class="card-inner vertical"><p class="lbl">A2DP driver</p><p class="val sm" id="m-driver">&mdash;</p><p class="sub" id="m-driver-sub">&nbsp;</p></div>
+            </section>
+            <section class="card">
+              <div class="card-inner vertical"><p class="lbl">Connection stability</p><p class="val sm" id="m-stability">&mdash;</p><p class="sub" id="m-stability-sub">&nbsp;</p></div>
+            </section>
+          </div>
+
+          <div class="grid-bottom">
+            <section class="card">
+              <div class="card-row-header"><p class="lbl"><i class="ti ti-list" aria-hidden="true"></i> All audio outputs</p><p class="sub" id="m-out-count">&nbsp;</p></div>
+              <div class="output-preview" id="output-preview"></div>
+            </section>
+            <section class="card">
+              <div class="card-row-header"><p class="lbl"><i class="ti ti-bolt" aria-hidden="true"></i> Quick actions</p></div>
+              <div class="quick-actions">
+                <button class="qa-tile qa-purple" id="qa-refresh"><i class="ti ti-refresh" aria-hidden="true"></i><span>Refresh devices</span></button>
+                <button class="qa-tile qa-purple" id="qa-audio-settings"><i class="ti ti-adjustments" aria-hidden="true"></i><span>Audio settings</span></button>
+                <button class="qa-tile qa-green" id="qa-export"><i class="ti ti-file-export" aria-hidden="true"></i><span>Export report</span></button>
+                <button class="qa-tile qa-amber" id="qa-sysinfo"><i class="ti ti-info-circle" aria-hidden="true"></i><span>System info</span></button>
+              </div>
+            </section>
+          </div>
+
+          <p class="foot" id="last-update">Waiting&hellip;</p>
+        </section>
+
+        <section class="page" id="page-outputs">
+          <section class="card">
+            <div class="card-row-header"><p class="lbl">All audio outputs</p><p class="sub" id="outputs-page-count">&nbsp;</p></div>
+            <div class="output-preview" id="outputs-page-list"></div>
+          </section>
+        </section>
+
+        <section class="page" id="page-devices">
+          <section class="card">
+            <div class="card-row-header"><p class="lbl">Known devices</p><p class="sub" id="devices-page-count">&nbsp;</p></div>
+            <div class="devices-grid" id="devices-grid"></div>
+          </section>
+          <div class="edu-box">
+            <p>Windows can keep several Bluetooth devices linked at once (for mic/calls/notifications), but only one can ever be the actual audio-streaming output at a time — that's a Windows limitation, not this app's. "Connected" means linked right now; "Active now (audio)" means it's the one actually streaming sound.</p>
+          </div>
+        </section>
+
+        <section class="page" id="page-codecs">
+          <section class="card">
+            <div class="card-row-header"><p class="lbl">Bluetooth codec comparison</p></div>
+            <div class="bars" id="codecs-bars"></div>
+          </section>
+          <div id="codecs-detail"></div>
+        </section>
+
+        <section class="page" id="page-statistics">
+          <section class="card timeline-card">
+            <div class="card-row-header">
+              <p class="lbl">Session timeline</p>
+              <select id="stats-range-select" aria-label="Time range">
+                <option value="10m">Last 10 minutes</option>
+                <option value="30m">Last 30 minutes</option>
+                <option value="1h">Last hour</option>
+                <option value="6h" selected>Last 6 hours</option>
+                <option value="24h">Last 24 hours</option>
+                <option value="all">All recorded</option>
+              </select>
+            </div>
+            <div class="chart-wrap chart-wrap-lg"><canvas id="stats-chart"></canvas></div>
+          </section>
+          <div class="grid3">
+            <section class="card"><div class="card-inner vertical"><p class="lbl">Min bitrate</p><p class="val" id="stat-min">&mdash;</p></div></section>
+            <section class="card"><div class="card-inner vertical"><p class="lbl">Avg bitrate</p><p class="val" id="stat-avg">&mdash;</p></div></section>
+            <section class="card"><div class="card-inner vertical"><p class="lbl">Max bitrate</p><p class="val" id="stat-max">&mdash;</p></div></section>
+          </div>
+          <section class="card">
+            <div class="card-row-header"><p class="lbl">Export</p></div>
+            <button class="btn-save export-link" id="stats-export-btn"><i class="ti ti-download" aria-hidden="true"></i>Export report</button>
+          </section>
+        </section>
+
+        <section class="page" id="page-alerts">
+          <section class="card">
+            <div class="card-row-header"><p class="lbl">Event log</p><p class="sub" id="alerts-count">&nbsp;</p></div>
+            <div class="alert-list" id="alerts-list"></div>
+          </section>
+        </section>
+
+        <section class="page" id="page-settings">
+          <section class="card" id="settings-page-card"><p>Loading&hellip;</p></section>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toasts"></div>
+
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal" id="modal">
+      <button class="modal-close" id="modal-close" title="Close"><i class="ti ti-x" aria-hidden="true"></i></button>
+      <div class="modal-content" id="modal-content"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

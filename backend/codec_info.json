@@ -1,0 +1,113 @@
+{
+  "codecs": {
+    "SBC": {
+      "title": "SBC (Subband Codec)",
+      "summary": "The basic, always-supported Bluetooth audio codec.",
+      "bitrate_kbps": 328,
+      "color": "#888780",
+      "paragraphs": [
+        "SBC is the standard, mandatory codec that every Bluetooth audio device on Earth supports. If nothing else can be negotiated, devices fall back to SBC.",
+        "It throws away a noticeable amount of detail to fit through the narrow Bluetooth pipe, so quiet background sounds and high-frequency content (cymbals, breath, room reverb) often sound smoothed-over.",
+        "Stock Windows only implements SBC for Bluetooth audio. To get anything better you need a 3rd-party driver such as Alternative A2DP Driver."
+      ]
+    },
+    "AAC": {
+      "title": "AAC",
+      "summary": "Higher-quality codec mainly used by Apple devices.",
+      "bitrate_kbps": 256,
+      "color": "#185FA5",
+      "paragraphs": [
+        "AAC (Advanced Audio Coding) is the same family used by Apple Music and YouTube. Over Bluetooth it caps around 256 kbps but is more efficient than SBC bit-for-bit.",
+        "On iPhone/Mac it sounds great; on Windows and Android the encoder is often weaker and SBC at high quality can actually beat it."
+      ]
+    },
+    "aptX": {
+      "title": "aptX",
+      "summary": "Qualcomm's low-latency codec, common on Android phones.",
+      "bitrate_kbps": 352,
+      "color": "#0F6E56",
+      "paragraphs": [
+        "aptX is a Qualcomm codec built into most Snapdragon phones and many Bluetooth headphones. It has lower latency than SBC, which matters for video.",
+        "Quality is similar to a well-tuned SBC. Not a huge step up by itself."
+      ]
+    },
+    "aptX HD": {
+      "title": "aptX HD",
+      "summary": "Hi-res variant of aptX, 24-bit / 48 kHz.",
+      "bitrate_kbps": 576,
+      "color": "#0F6E56",
+      "paragraphs": [
+        "aptX HD nearly doubles the data rate of regular aptX and supports 24-bit/48 kHz audio. A genuine quality bump if your headphones support it.",
+        "Less common on earbuds; more often found on over-ear cans and Hi-Fi-focused gear."
+      ]
+    },
+    "LDAC": {
+      "title": "LDAC",
+      "summary": "Sony's hi-res codec sending up to 3x more data than SBC.",
+      "bitrate_kbps": 990,
+      "color": "#534AB7",
+      "paragraphs": [
+        "LDAC is Sony's wireless audio codec, built into Android since 8.0. It can stream up to 990 kbps over Bluetooth - roughly 3x what SBC manages.",
+        "More data means cymbals stay crisp, quiet background sounds survive, and the music gets noticeably closer to listening to a CD or lossless source.",
+        "The catch: LDAC needs a strong, stable signal. If you walk away from the laptop or there's Wi-Fi interference on 2.4 GHz, it auto-drops to 660 or 330 kbps to avoid stutter. Your monitor will show when this happens.",
+        "Latency is higher than SBC/aptX (around 200ms), which is fine for music but noticeable in fast-paced gaming."
+      ]
+    }
+  },
+  "metrics": {
+    "bitrate": {
+      "title": "Transmission speed (bitrate)",
+      "paragraphs": [
+        "Bitrate is how many kilobits of music data are reaching your earbuds every second. Higher means more sound detail survives the trip through Bluetooth.",
+        "LDAC has three modes: 990 kbps (best quality), 660 kbps (balanced), 330 kbps (connection priority). The codec switches between them automatically based on signal stability."
+      ]
+    },
+    "stability": {
+      "title": "Connection stability",
+      "paragraphs": [
+        "Windows has no API to read RSSI (signal strength in dBm) for an already-connected classic Bluetooth audio device — that's only exposed during BLE advertisement scanning, which doesn't apply to a connected earbud. So instead of faking a signal number, this counts real disconnects and codec downgrades.",
+        "'Stable' = no disconnects or codec downgrades in the last 10 minutes. 'Occasional drops' = 1-2 events. 'Unstable' = 3 or more — usually means you're at the edge of range, there's 2.4GHz interference (Wi-Fi, microwaves), or the connection is congested.",
+        "A codec downgrade (e.g. LDAC dropping from 990 to 330 kbps) is itself a sign the connection got weaker, even without a full disconnect."
+      ]
+    },
+    "latency": {
+      "title": "Latency",
+      "paragraphs": [
+        "Latency is the delay between sound leaving your laptop and reaching your ears. Measured in milliseconds (ms).",
+        "Compressing high-quality audio takes processing time on both ends. 150-250 ms is normal for LDAC. SBC and aptX are lower (~100-150 ms). aptX LL is built specifically for low latency.",
+        "Fine for music; modern video apps auto-sync; can be noticeable in fast-paced gaming."
+      ]
+    },
+    "battery": {
+      "title": "Earbud battery",
+      "paragraphs": [
+        "Battery percentage as reported by the earbuds over Bluetooth.",
+        "Many true-wireless earbuds only expose a single combined battery level to Windows (not separate left/right/case). Per-bud and case battery typically requires the manufacturer's mobile app or a Bluetooth LE GATT query that this device may not advertise."
+      ]
+    },
+    "sample_rate": {
+      "title": "Sample rate & bit depth",
+      "paragraphs": [
+        "Sample rate is how many audio measurements per second (48 kHz = 48,000 samples). Bit depth is how precise each measurement is (16-bit = 65,536 levels, 24-bit = 16.7 million levels).",
+        "CD quality is 44.1 kHz / 16-bit. Hi-res starts at 48 kHz / 24-bit. LDAC supports up to 96 kHz / 24-bit.",
+        "Heads up: Windows' shared audio engine often resamples everything to its mix format (usually 48 kHz / 16-bit) before sending to Bluetooth - so even hi-res LDAC may get downsampled in software first unless you use WASAPI exclusive mode."
+      ]
+    }
+  },
+  "outputs": {
+    "bluetooth": {
+      "title": "Bluetooth output",
+      "paragraphs": [
+        "Wireless connection - convenient, no cables, but limited by codec choice and signal strength.",
+        "Quality depends entirely on which codec your device and PC agree on. Stock Windows = SBC only. With Alternative A2DP Driver = LDAC/aptX HD possible."
+      ]
+    },
+    "wired": {
+      "title": "Wired output",
+      "paragraphs": [
+        "Direct analog signal from the headphone jack or built-in speakers, driven by the system's audio chip.",
+        "No compression, no codec, no battery to drain. The cleanest possible path - usually beats any Bluetooth codec for absolute fidelity if your headphones are good."
+      ]
+    }
+  }
+}
