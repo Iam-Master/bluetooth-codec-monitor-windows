@@ -30,12 +30,16 @@ Real-time Bluetooth audio codec monitor for Windows. See exactly which codec (SB
 
 ## Quick Start
 
+### Option 0: Download a Prebuilt Release
+
+Grab the latest standalone exe or installer from the [Releases page](https://github.com/Iam-Master/Codec-Monitor/releases) — no Python required.
+
 ### Option 1: Run from Source
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/user/codec-monitor.git
-   cd codec-monitor
+   git clone https://github.com/Iam-Master/Codec-Monitor.git
+   cd Codec-Monitor
    ```
 
 2. Double-click `start.bat` — it will:
@@ -66,6 +70,8 @@ codec-monitor/
 │   ├── index.html          # Single-page app UI
 │   ├── app.js              # Frontend logic, WebSocket client, Chart.js
 │   └── style.css           # Full design system with light/dark themes
+├── screenshots/            # README images
+├── .github/                # Issue/PR templates, CI and release workflows
 ├── start.bat               # One-click launcher
 ├── build.bat               # Build standalone exe + installer
 ├── installer.iss           # Inno Setup installer script

@@ -3,7 +3,7 @@
 ; Produces dist\CodecMonitor-Setup.exe
 
 #define MyAppName "Codec Monitor"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Codec Monitor"
 #define MyAppExeName "Codec Monitor.exe"
 
