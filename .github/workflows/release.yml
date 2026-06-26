@@ -51,6 +51,21 @@ jobs:
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, $block, $utf8NoBom)
 
+      - name: Delete existing release for this tag (avoids stale-body reuse)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $headers = @{ Authorization = "token $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
+          try {
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers -Method Get -ErrorAction Stop
+            Invoke-RestMethod -Uri $rel.url -Headers $headers -Method Delete
+            Write-Host "Deleted existing release id $($rel.id) for tag $tag"
+          } catch {
+            Write-Host "No existing release found for tag $tag - nothing to delete"
+          }
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
