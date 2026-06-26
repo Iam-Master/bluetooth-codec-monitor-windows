@@ -28,6 +28,8 @@ import urllib.parse
 import winreg
 from datetime import datetime
 from pathlib import Path
+import contextlib
+import html
 
 import websockets
 from win11toast import toast as _win_toast
@@ -66,10 +68,28 @@ CODEC_INFO = json.loads(INFO_PATH.read_text(encoding="utf-8"))
 
 _cached_snapshot = None
 _snapshot_lock = threading.Lock()
-_current_device_name = None
+_current_device_id = None
 _device_connect_time = time.time()
 
+# Caches for optimization
+_playback_device_cache = None
+_playback_device_cache_time = 0.0
+_playback_device_cache_lock = threading.Lock()
+
+_known_devices_cache = None
+_known_devices_cache_time = 0.0
+_known_devices_cache_lock = threading.Lock()
+
 _photo_fetch_lock = threading.Lock()
+
+_last_history_state = None
+_last_history_time = 0.0
+
+_active_photo_fetches = set()
+_active_photo_fetches_lock = threading.Lock()
+
+_ws_queues = set()
+_ws_queues_lock = threading.Lock()
 
 # Raw bt_devices data from the slow PowerShell-based loop (battery lookups are
 # the expensive part here, ~1.2s/device). The fast loop reads this (possibly
@@ -233,15 +253,14 @@ def get_settings() -> dict:
 
 def save_settings(new_settings: dict):
     global _settings
-    merged = dict(DEFAULT_SETTINGS)
     with _settings_lock:
+        merged = dict(DEFAULT_SETTINGS)
         merged.update(_settings)
-    for key in DEFAULT_SETTINGS:
-        if key in new_settings:
-            merged[key] = new_settings[key]
-    with _settings_lock:
+        for key in DEFAULT_SETTINGS:
+            if key in new_settings:
+                merged[key] = new_settings[key]
         _settings = merged
-    SETTINGS_PATH.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+        SETTINGS_PATH.write_text(json.dumps(merged, indent=2), encoding="utf-8")
     return merged
 
 _alerts = collections.deque(maxlen=100)
@@ -473,29 +492,36 @@ def get_known_devices_with_mac() -> list[tuple[str, str]]:
     the Current\\{mac} key), so this also gives us a fast way to find which
     paired device is actively streaming without touching PowerShell at all.
     """
-    result = []
-    try:
-        base = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                              f"{ALT_A2DP_REG_BASE}\\Capability")
-        i = 0
-        while True:
-            try:
-                key_name = winreg.EnumKey(base, i)
-                sub = winreg.OpenKey(base, key_name)
+    global _known_devices_cache, _known_devices_cache_time
+    now = time.time()
+    with _known_devices_cache_lock:
+        if _known_devices_cache_time and (now - _known_devices_cache_time) < 5.0:
+            return _known_devices_cache
+        result = []
+        try:
+            base = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                  f"{ALT_A2DP_REG_BASE}\\Capability")
+            i = 0
+            while True:
                 try:
-                    name, _ = winreg.QueryValueEx(sub, "Name")
-                    if name:
-                        result.append((_normalize_mac_raw(key_name), name))
-                except (FileNotFoundError, OSError):
-                    pass
-                winreg.CloseKey(sub)
-                i += 1
-            except OSError:
-                break
-        winreg.CloseKey(base)
-    except (FileNotFoundError, OSError):
-        pass
-    return result
+                    key_name = winreg.EnumKey(base, i)
+                    sub = winreg.OpenKey(base, key_name)
+                    try:
+                        name, _ = winreg.QueryValueEx(sub, "Name")
+                        if name:
+                            result.append((_normalize_mac_raw(key_name), name))
+                    except (FileNotFoundError, OSError):
+                        pass
+                    winreg.CloseKey(sub)
+                    i += 1
+                except OSError:
+                    break
+            winreg.CloseKey(base)
+        except (FileNotFoundError, OSError):
+            pass
+        _known_devices_cache = result
+        _known_devices_cache_time = now
+        return result
 
 
 def get_known_device_names() -> list[str]:
@@ -515,10 +541,18 @@ def get_default_playback_device_name() -> str | None:
     underlying A2DP connection just isn't torn down immediately) — trusting
     Opened alone meant switching outputs kept showing the previous device.
     Sub-50ms; safe to call every fast-loop tick."""
-    try:
-        return AudioUtilities.GetSpeakers().FriendlyName
-    except Exception:
-        return None
+    global _playback_device_cache, _playback_device_cache_time
+    now = time.time()
+    with _playback_device_cache_lock:
+        if _playback_device_cache_time and (now - _playback_device_cache_time) < 0.5:
+            return _playback_device_cache
+        try:
+            val = AudioUtilities.GetSpeakers().FriendlyName
+        except Exception:
+            val = None
+        _playback_device_cache = val
+        _playback_device_cache_time = now
+        return val
 
 
 def find_active_alt_a2dp_device() -> dict | None:
@@ -614,31 +648,47 @@ def _search_device_image_url(device_name: str) -> str | None:
         print(f"  Image search failed for '{device_name}': {e}")
     return None
 
+BT_EXCLUSION_REGEX = r"Generic|Profile|^Bluetooth LE|Service|Enumerator|Transport|Avrcp|RFCOMM|Microsoft Bluetooth|Personal Area|Identification|Standard Serial|Wireless Bluetooth|Bluetooth Adapter|Bluetooth Radio|Bluetooth Module"
+
 WINDOWS_PAIRED_BT_SCRIPT = r"""
 Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object {
     $_.FriendlyName -and
-    $_.FriendlyName -notmatch 'Generic|Profile|^Bluetooth LE|Service|Enumerator|Transport|Avrcp|RFCOMM|Microsoft Bluetooth|Personal Area|Identification|Standard Serial|Wireless Bluetooth|Bluetooth Adapter|Bluetooth Radio|Bluetooth Module'
+    $_.FriendlyName -notmatch '__BT_EXCLUSION_REGEX__'
 } | Select-Object -ExpandProperty FriendlyName
-"""
+""".replace("__BT_EXCLUSION_REGEX__", BT_EXCLUSION_REGEX)
+
+_paired_bt_cache = None
+_paired_bt_cache_time = 0.0
+_paired_bt_cache_lock = threading.Lock()
+
 
 def get_windows_paired_bt_names() -> list[str]:
+    global _paired_bt_cache, _paired_bt_cache_time
+    now = time.time()
+    with _paired_bt_cache_lock:
+        if _paired_bt_cache is not None and (now - _paired_bt_cache_time) < 30.0:
+            return list(_paired_bt_cache)
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_PAIRED_BT_SCRIPT],
             capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW,
         )
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        with _paired_bt_cache_lock:
+            _paired_bt_cache = names
+            _paired_bt_cache_time = time.time()
+        return list(names)
     except (subprocess.TimeoutExpired, OSError):
+        with _paired_bt_cache_lock:
+            if _paired_bt_cache is not None:
+                return list(_paired_bt_cache)
         return []
 
 def get_history_seen_device_names() -> list[str]:
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         rows = conn.execute(
             "SELECT DISTINCT device FROM history WHERE device IS NOT NULL AND type = 'bluetooth'"
         ).fetchall()
-    finally:
-        conn.close()
     return [r[0] for r in rows]
 
 _DEVICE_NAME_WRAPPER_RE = re.compile(r"^(?:headset|headphones|hands-?free.*?)\s*\((.+)\)$", re.IGNORECASE)
@@ -659,15 +709,12 @@ def get_all_known_device_names() -> list[str]:
     return names
 
 def get_last_known_battery(device_name: str):
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         row = conn.execute(
             "SELECT battery FROM history WHERE device = ? AND battery IS NOT NULL "
             "ORDER BY t DESC LIMIT 1",
             (device_name,),
         ).fetchone()
-    finally:
-        conn.close()
     return row[0] if row else None
 
 def get_currently_connected_bt_devices() -> dict:
@@ -693,8 +740,9 @@ def list_known_devices() -> list[dict]:
     connected_now = get_currently_connected_bt_devices()
 
     names = get_all_known_device_names()
-    if active_device and active_device.get("type") == "bluetooth" and active_device["name"] not in names:
-        names.append(active_device["name"])
+    active_name = active_device.get("name") if active_device else None
+    if active_device and active_device.get("type") == "bluetooth" and active_name and active_name not in names:
+        names.append(active_name)
 
     result = []
     for name in names:
@@ -750,6 +798,19 @@ def get_photo_path(device_name: str) -> str | None:
     return None
 
 
+def _write_photo_atomic(dest, data):
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def fetch_photo_for_device(device_name: str):
     """Automatically fetch a product photo for any Bluetooth device.
 
@@ -780,12 +841,18 @@ def fetch_photo_for_device(device_name: str):
                     return
                 data = resp.read(2 * 1024 * 1024)
             if len(data) > 500:
-                tmp = dest.with_suffix(dest.suffix + ".tmp")
-                tmp.write_bytes(data)
-                os.replace(tmp, dest)
+                _write_photo_atomic(dest, data)
                 print(f"  Photo cached: {dest.name} ({len(data)} bytes)")
         except Exception as e:
             print(f"  Photo fetch failed for {device_name}: {e}")
+
+
+def _fetch_photo_wrapper(device_name: str):
+    try:
+        fetch_photo_for_device(device_name)
+    finally:
+        with _active_photo_fetches_lock:
+            _active_photo_fetches.discard(device_name)
 
 
 def prefetch_photos():
@@ -799,11 +866,25 @@ def prefetch_photos():
             fetch_photo_for_device(name)
 
 
-# ---------- History (in-memory + SQLite) + Alerts ----------
-
-def init_history_db():
+@contextlib.contextmanager
+def _db_connection():
     conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except OSError:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def init_history_db():
+    with _db_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 t REAL NOT NULL,
@@ -816,9 +897,8 @@ def init_history_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_t ON history(t)")
-        conn.commit()
-    finally:
-        conn.close()
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_history_mac ON history(mac)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_history_device ON history(device)")
 
 
 def add_history_point(snap: dict):
@@ -845,15 +925,12 @@ def get_history():
 def load_recent_history_into_memory():
     """On startup, pull recent rows from SQLite so the timeline isn't empty."""
     since = time.time() - HISTORY_LOAD_HOURS * 3600
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         rows = conn.execute(
             "SELECT t, device, mac, codec, bitrate, battery, type FROM history "
             "WHERE t >= ? ORDER BY t ASC LIMIT ?",
             (since, MAX_HISTORY),
         ).fetchall()
-    finally:
-        conn.close()
     with _history_lock:
         for t, device, mac, codec, bitrate, battery, dtype in rows:
             _history.append({
@@ -871,27 +948,28 @@ def flush_history_to_db():
             return
         rows = list(_pending_history_rows)
         _pending_history_rows.clear()
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         conn.executemany(
             "INSERT INTO history (t, device, mac, codec, bitrate, battery, type) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(r["t"], r["device"], r["mac"], r["codec"], r["bitrate"], r["battery"], r["type"]) for r in rows],
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def prune_history_db():
     retention_days = get_settings()["history_retention_days"]
     cutoff = time.time() - retention_days * 86400
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         conn.execute("DELETE FROM history WHERE t < ?", (cutoff,))
         conn.commit()
-    finally:
-        conn.close()
+        conn.execute("VACUUM")
+
+
+def _sanitize_csv_field(value):
+    s = "" if value is None else str(value)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
 
 
 def export_history_csv(mac: str | None = None, since_epoch: float | None = None) -> str:
@@ -904,7 +982,12 @@ def export_history_csv(mac: str | None = None, since_epoch: float | None = None)
     for r in rows:
         writer.writerow([
             datetime.fromtimestamp(r["t"]).isoformat(timespec="seconds"),
-            r["device"], r["mac"], r["codec"], r["bitrate"], r["battery"], r["type"],
+            _sanitize_csv_field(r["device"]),
+            _sanitize_csv_field(r["mac"]),
+            _sanitize_csv_field(r["codec"]),
+            r["bitrate"],
+            r["battery"],
+            _sanitize_csv_field(r["type"]),
         ])
     return buf.getvalue()
 
@@ -924,7 +1007,9 @@ def export_history_markdown(mac: str | None = None, since_epoch: float | None = 
     ]
     for r in rows:
         ts = datetime.fromtimestamp(r["t"]).isoformat(timespec="seconds")
-        lines.append(f"| {ts} | {r['device'] or ''} | {r['codec'] or ''} | {r['bitrate'] if r['bitrate'] is not None else ''} | {r['battery'] if r['battery'] is not None else ''} | {r['type'] or ''} |")
+        device_name = r["device"] or ""
+        device_escaped = html.escape(device_name).replace("|", "\\|")
+        lines.append(f"| {ts} | {device_escaped} | {r['codec'] or ''} | {r['bitrate'] if r['bitrate'] is not None else ''} | {r['battery'] if r['battery'] is not None else ''} | {r['type'] or ''} |")
     return "\n".join(lines) + "\n"
 
 
@@ -968,20 +1053,17 @@ def export_history_pdf(mac: str | None = None, since_epoch: float | None = None)
 
 
 def query_history_rows(mac: str | None = None, since_epoch: float | None = None) -> list[dict]:
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         query = "SELECT t, device, mac, codec, bitrate, battery, type FROM history WHERE 1=1"
         params = []
-        if mac:
+        if mac is not None:
             query += " AND mac = ?"
             params.append(mac)
-        if since_epoch:
+        if since_epoch is not None:
             query += " AND t >= ?"
             params.append(since_epoch)
         query += " ORDER BY t ASC"
         rows = conn.execute(query, params).fetchall()
-    finally:
-        conn.close()
     return [
         {"t": t, "device": device, "mac": devmac, "codec": codec, "bitrate": bitrate, "battery": battery, "type": dtype}
         for t, device, devmac, codec, bitrate, battery, dtype in rows
@@ -989,19 +1071,16 @@ def query_history_rows(mac: str | None = None, since_epoch: float | None = None)
 
 
 def compute_bitrate_stats(mac: str | None = None, since_epoch: float | None = None) -> dict:
-    conn = sqlite3.connect(HISTORY_DB_PATH, timeout=10)
-    try:
+    with _db_connection() as conn:
         query = "SELECT MIN(bitrate), AVG(bitrate), MAX(bitrate), COUNT(*) FROM history WHERE bitrate IS NOT NULL"
         params = []
-        if mac:
+        if mac is not None:
             query += " AND mac = ?"
             params.append(mac)
-        if since_epoch:
+        if since_epoch is not None:
             query += " AND t >= ?"
             params.append(since_epoch)
         row = conn.execute(query, params).fetchone()
-    finally:
-        conn.close()
     mn, avg, mx, count = row
     return {
         "min": mn, "avg": round(avg) if avg is not None else None, "max": mx, "count": count,
@@ -1171,7 +1250,7 @@ while ($true) {
         $allDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue)
         $bt = @($allDevices | Where-Object {
             $_.Class -eq 'Bluetooth' -and $_.Status -eq 'OK' -and $_.FriendlyName -and
-            $_.FriendlyName -notmatch 'Generic|Profile|^Bluetooth LE|Service|Enumerator|Transport|Avrcp|RFCOMM|Microsoft Bluetooth|Personal Area|Identification|Standard Serial|Wireless Bluetooth|Bluetooth Adapter|Bluetooth Radio|Bluetooth Module'
+            $_.FriendlyName -notmatch '__BT_EXCLUSION_REGEX__'
         })
 
         $rows = @()
@@ -1216,7 +1295,7 @@ while ($true) {
     }
     Start-Sleep -Milliseconds __POLL_MS__
 }
-"""
+""".replace("__BT_EXCLUSION_REGEX__", BT_EXCLUSION_REGEX)
 
 ENDPOINTS_LOOP_SCRIPT = r"""
 while ($true) {
@@ -1343,7 +1422,7 @@ def _best_name_match(target: str, candidates: list, name_key=lambda x: x):
 
 
 def build_snapshot_from_raw(raw: dict) -> dict:
-    global _current_device_name, _device_connect_time, _alt_a2dp_installed
+    global _current_device_id, _device_connect_time, _alt_a2dp_installed
 
     if _alt_a2dp_installed is None:
         _alt_a2dp_installed = is_alt_a2dp_installed()
@@ -1433,14 +1512,19 @@ def build_snapshot_from_raw(raw: dict) -> dict:
         if matched_bt:
             mac_raw = extract_mac_raw(matched_bt.get("InstanceId", ""))
 
-    device_name = active_ep["name"] if active_ep else None
-    if device_name != _current_device_name:
-        _current_device_name = device_name
+    # Track device uptime using unique MAC if bluetooth, otherwise friendly name
+    uptime_id = mac_raw if (matched_bt and mac_raw) else (active_ep["name"] if active_ep else None)
+    global _current_device_id
+    if uptime_id != _current_device_id:
+        _current_device_id = uptime_id
         _device_connect_time = time.time()
 
     if matched_bt:
         bt_name = matched_bt["Name"]
-        fetch_photo_for_device(bt_name)
+        with _active_photo_fetches_lock:
+            if not get_photo_path(bt_name) and bt_name not in _active_photo_fetches:
+                _active_photo_fetches.add(bt_name)
+                threading.Thread(target=_fetch_photo_wrapper, args=(bt_name,), daemon=True).start()
         photo_url = get_photo_path(bt_name)
         device = {
             "name": bt_name,
@@ -1479,6 +1563,20 @@ def build_snapshot_from_raw(raw: dict) -> dict:
     for e in endpoints:
         if e["type"] == "microphone" and e["status"] == "OK":
             output_list.append({"name": e["name"], "type": "microphone", "status": e["status"], "active": False})
+
+    # Evict disconnected battery cache entries
+    connected_macs = set()
+    with _instance_id_cache_lock:
+        for name, ids in _instance_id_cache.items():
+            for iid in ids:
+                if cm_is_device_connected(iid):
+                    m = extract_mac_raw(iid)
+                    if m:
+                        connected_macs.add(m)
+    with _battery_cache_lock:
+        for mac in list(_battery_cache.keys()):
+            if mac not in connected_macs:
+                _battery_cache.pop(mac, None)
 
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1566,7 +1664,7 @@ def slow_loop():
                         if iid:
                             set_cached_instance_id(_clean_device_name(name), iid)
                 batt = d.get("Battery")
-                if batt:
+                if batt is not None:
                     mac_raw = extract_mac_raw(instance_id)
                     if mac_raw:
                         set_cached_battery(mac_raw, batt)
@@ -1605,9 +1703,10 @@ def fast_loop():
     disconnect/codec changes show up in well under a second instead of waiting
     on slow_loop.
     """
-    global _cached_snapshot
+    global _cached_snapshot, _last_history_state, _last_history_time
     comtypes.CoInitialize()  # this thread calls pycaw (Core Audio API) every tick
-    while True:
+    _last_payload_json = ""
+    while not _shutting_down.is_set():
         with _cached_raw_lock:
             bt = list(_cached_raw["bluetooth"])
         with _cached_endpoints_lock:
@@ -1615,52 +1714,105 @@ def fast_loop():
         raw = {"bluetooth": bt, "endpoints": endpoints}
         snap = build_snapshot_from_raw(raw)
         new_alerts = check_alerts(snap)
-        add_history_point(snap)
-        with _snapshot_lock:
-            _cached_snapshot = (snap, new_alerts)
+        
+        # O1: Deduplicate DB Insertion
+        device = snap["device"]
+        current_state = {
+            "device": device["name"] if device else None,
+            "connected": device["connected"] if device else False,
+            "codec": snap["codec"]["name"],
+            "bitrate": snap["codec"].get("bitrate_kbps"),
+            "battery": device.get("battery") if device else None,
+        }
+        now = time.time()
+        if _last_history_state is None or current_state != _last_history_state or (now - _last_history_time) > 60.0:
+            add_history_point(snap)
+            _last_history_state = current_state
+            _last_history_time = now
+            
+        # O2: WebSocket Snapshot Deduplication
+        payload = {
+            "device": snap["device"],
+            "codec": snap["codec"],
+            "alt_a2dp_installed": snap["alt_a2dp_installed"],
+            "connection_stability": snap["connection_stability"],
+            "outputs": snap["outputs"],
+        }
+        payload_json = json.dumps(payload)
+        if payload_json != _last_payload_json:
+            _last_payload_json = payload_json
+            with _snapshot_lock:
+                _cached_snapshot = (snap, new_alerts)
+            msg = {"type": "snapshot", "data": snap}
+            with _ws_queues_lock:
+                for q, loop in _ws_queues:
+                    loop.call_soon_threadsafe(q.put_nowait, msg)
+        
+        if new_alerts:
+            msg_alerts = {"type": "alerts", "data": new_alerts}
+            with _ws_queues_lock:
+                for q, loop in _ws_queues:
+                    loop.call_soon_threadsafe(q.put_nowait, msg_alerts)
+                    
         time.sleep(get_settings()["poll_interval_ms"] / 1000)
         # proc's stdout closed (terminated via force_refresh, or it crashed) — respawn.
 
 
 # ---------- HTTP server (serves frontend + photos) ----------
 
+def _sanitize_path(path_str: str) -> str:
+    if not path_str:
+        return path_str
+    appdata = os.environ.get("APPDATA")
+    userprofile = os.environ.get("USERPROFILE") or str(Path.home())
+    
+    path_norm = os.path.normpath(path_str)
+    
+    if appdata:
+        appdata_norm = os.path.normpath(appdata)
+        if path_norm.lower().startswith(appdata_norm.lower()):
+            suffix = path_norm[len(appdata_norm):].lstrip(os.sep)
+            return os.path.join("%APPDATA%", suffix).replace("\\", "/")
+            
+    if userprofile:
+        userprofile_norm = os.path.normpath(userprofile)
+        if path_norm.lower().startswith(userprofile_norm.lower()):
+            suffix = path_norm[len(userprofile_norm):].lstrip(os.sep)
+            return os.path.join("%USERPROFILE%", suffix).replace("\\", "/")
+            
+    return path_norm.replace("\\", "/")
+
+
 class _Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(FRONTEND_DIR), **kwargs)
 
+    def _send_json(self, status, data):
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/settings":
-            body = json.dumps(get_settings()).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, get_settings())
             return
         if self.path == "/devices":
-            body = json.dumps(list_known_devices()).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, list_known_devices())
             return
         if self.path == "/sysinfo":
             info = {
                 "version": APP_VERSION,
-                "data_dir": str(DATA_DIR),
+                "data_dir": _sanitize_path(str(DATA_DIR)),
                 "ports": {"http": PORT_HTTP, "ws": PORT_WS},
                 "frozen": bool(getattr(sys, "frozen", False)),
                 "alt_a2dp_installed": is_alt_a2dp_installed(),
-                "settings_path": str(SETTINGS_PATH),
-                "history_db_path": str(HISTORY_DB_PATH),
+                "settings_path": _sanitize_path(str(SETTINGS_PATH)),
+                "history_db_path": _sanitize_path(str(HISTORY_DB_PATH)),
             }
-            body = json.dumps(info).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, info)
             return
         if self.path.startswith("/history") or self.path.startswith("/stats") or self.path.startswith("/export.csv"):
             parsed = urllib.parse.urlparse(self.path)
@@ -1677,12 +1829,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
             if parsed.path == "/history":
                 rows = query_history_rows(mac=mac, since_epoch=since_epoch)
-                body = json.dumps(rows).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(200, rows)
                 return
 
             if parsed.path == "/export.csv":
@@ -1697,12 +1844,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 return
 
             stats = compute_bitrate_stats(mac=mac, since_epoch=since_epoch)
-            body = json.dumps(stats).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, stats)
             return
         if self.path.startswith("/photos/"):
             fname = urllib.parse.unquote(self.path[len("/photos/"):].split("?")[0].split("#")[0])
@@ -1774,12 +1916,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400)
                 return
             merged = save_settings(payload)
-            body = json.dumps(merged).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, merged)
             return
         self.send_error(404)
 
@@ -1788,42 +1925,58 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def run_http_server():
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", PORT_HTTP), _Handler) as httpd:
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    with socketserver.ThreadingTCPServer(("127.0.0.1", PORT_HTTP), _Handler) as httpd:
         httpd.serve_forever()
 
 
 # ---------- WebSocket ----------
 
-async def ws_handler(websocket):
-    await websocket.send(json.dumps({"type": "education", "data": CODEC_INFO}))
-    await websocket.send(json.dumps({"type": "history", "data": get_history()}))
-    past_alerts = get_alerts()
-    if past_alerts:
-        await websocket.send(json.dumps({"type": "alerts_history", "data": past_alerts}))
-
-    with _snapshot_lock:
-        cached = _cached_snapshot
-    if cached:
-        snap, _ = cached
-        await websocket.send(json.dumps({"type": "snapshot", "data": snap}))
-
-    last_json = ""
+def _ws_origin_allowed(origin):
+    if not origin:
+        return True
     try:
+        parsed = urllib.parse.urlparse(origin)
+        return (
+            parsed.scheme == "http"
+            and parsed.hostname in ("127.0.0.1", "localhost")
+            and parsed.port == PORT_HTTP
+        )
+    except ValueError:
+        return False
+
+
+async def ws_handler(websocket):
+    origin = websocket.request_headers.get("Origin")
+    if not _ws_origin_allowed(origin):
+        await websocket.close(code=1008, reason="origin not allowed")
+        return
+
+    loop = asyncio.get_running_loop()
+    q = asyncio.Queue()
+    with _ws_queues_lock:
+        _ws_queues.add((q, loop))
+    try:
+        await websocket.send(json.dumps({"type": "education", "data": CODEC_INFO}))
+        await websocket.send(json.dumps({"type": "history", "data": get_history()}))
+        past_alerts = get_alerts()
+        if past_alerts:
+            await websocket.send(json.dumps({"type": "alerts_history", "data": past_alerts}))
+
+        with _snapshot_lock:
+            cached = _cached_snapshot
+        if cached:
+            snap, _ = cached
+            await websocket.send(json.dumps({"type": "snapshot", "data": snap}))
+
         while True:
-            with _snapshot_lock:
-                cached = _cached_snapshot
-            if cached:
-                snap, new_alerts = cached
-                j = json.dumps({"type": "snapshot", "data": snap})
-                if j != last_json:
-                    await websocket.send(j)
-                    if new_alerts:
-                        await websocket.send(json.dumps({"type": "alerts", "data": new_alerts}))
-                    last_json = j
-            await asyncio.sleep(0.3)
+            msg = await q.get()
+            await websocket.send(json.dumps(msg))
     except websockets.exceptions.ConnectionClosed:
         return
+    finally:
+        with _ws_queues_lock:
+            _ws_queues.discard((q, loop))
 
 
 async def run_ws_server():

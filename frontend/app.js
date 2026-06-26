@@ -1,5 +1,30 @@
 // Codec Monitor — sidebar app frontend.
 
+/*
+ * Codec Monitor — browser frontend (app.js)
+ *
+ * Plain browser script (loaded by index.html via <script src="app.js">, after
+ * utils.js which provides window.CMUtils). Renders the single-page UI for the
+ * Codec Monitor served by the local HTTP server.
+ *
+ * Page sections (tabs): dashboard, audio outputs, devices, statistics,
+ * codecs/education, and alerts.
+ *
+ * WebSocket protocol:
+ *   Connects to ws://127.0.0.1:8766/ (host derived from location.hostname,
+ *   defaulting to localhost) and auto-reconnects with backoff. Each frame is a
+ *   JSON object { type, data }. Handled `type` values (see ws.onmessage below):
+ *     - "education"      : codec reference content for the codecs page
+ *     - "history"        : full history array (replaces historyData)
+ *     - "alerts_history" : full alerts backlog (replaces alertsLog)
+ *     - "snapshot"       : live state; rendered and appended to historyData
+ *     - "alerts"         : new alert events (toasts + appended to alertsLog)
+ *
+ * Key globals:
+ *   lastSnap       - most recent snapshot payload
+ *   historyData    - in-memory time series (trimmed via CMUtils.trimHistory)
+ *   chartInstances - keyed, reused Chart.js instances (never destroyed)
+ */
 const WS_URL = `ws://${location.hostname || "localhost"}:8766/`;
 
 // Device/output names ultimately come from Bluetooth FriendlyName strings,
@@ -22,7 +47,10 @@ let historyData = [];
 let alertsLog = [];
 let alertSoundEnabled = true;
 let wsConnected = false;
+let audioCtx = null;
 const chartInstances = {};
+// Trim threshold for in-memory history; mirrors backend MAX_HISTORY (2200).
+const MAX_HISTORY = 2200;
 
 // ==================== Theme (light/dark) ====================
 function applyTheme(t) {
@@ -104,17 +132,22 @@ function deviceSvg(type) {
 function playBeep() {
   if (!alertSoundEnabled) return;
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume();
+    }
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(audioCtx.destination);
     osc.frequency.value = 880;
     osc.type = "sine";
     gain.gain.value = 0.15;
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.3);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 0.3);
   } catch {}
 }
 
@@ -185,9 +218,9 @@ function showSystemInfoModal() {
       <tr><td>Alt A2DP driver</td><td>${info.alt_a2dp_installed ? "Installed" : "Not installed"}</td></tr>
       <tr><td>HTTP port</td><td>${info.ports.http}</td></tr>
       <tr><td>WebSocket port</td><td>${info.ports.ws}</td></tr>
-      <tr><td>Data folder</td><td>${info.data_dir}</td></tr>
-      <tr><td>Settings file</td><td>${info.settings_path}</td></tr>
-      <tr><td>History database</td><td>${info.history_db_path}</td></tr>
+      <tr><td>Data folder</td><td>${escapeHtml(info.data_dir)}</td></tr>
+      <tr><td>Settings file</td><td>${escapeHtml(info.settings_path)}</td></tr>
+      <tr><td>History database</td><td>${escapeHtml(info.history_db_path)}</td></tr>
     </table>`;
   }).catch(() => { modalEl.innerHTML = `<h3>System info</h3><p>Could not load system info.</p>`; });
 }
@@ -217,10 +250,10 @@ function getChartRows(range, mac) {
   const minutes = RANGE_INMEMORY_MIN[range];
   if (minutes && !mac) {
     const cutoff = Date.now() / 1000 - minutes * 60;
-    const rows = historyData.filter(h => h.t >= cutoff);
-    // In-memory buffer starts empty on a fresh launch — fall back to the
-    // persisted history on disk instead of showing a blank chart.
-    if (rows.length) return Promise.resolve(rows);
+    if (historyData.length && historyData[0].t <= cutoff) {
+      const rows = historyData.filter(h => h.t >= cutoff);
+      return Promise.resolve(rows);
+    }
   }
   return fetch(`/history?${rangeQueryParams(range, mac)}`).then(r => r.json());
 }
@@ -236,11 +269,28 @@ function buildBitrateChart(canvasId, rows, key) {
   const labels = pts.map(r => new Date(r.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
   const data = pts.map(r => r.bitrate);
 
-  if (chartInstances[key]) chartInstances[key].destroy();
   const ctx = canvas.getContext("2d");
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.clientHeight || 200);
   gradient.addColorStop(0, isDark ? "rgba(175,169,236,0.4)" : "rgba(83,74,183,0.3)");
   gradient.addColorStop(1, isDark ? "rgba(175,169,236,0.0)" : "rgba(83,74,183,0.0)");
+
+  if (chartInstances[key]) {
+    const chart = chartInstances[key];
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.data.datasets[0].borderColor = lineColor;
+    chart.data.datasets[0].backgroundColor = gradient;
+    if (chart.options.scales?.x?.ticks) chart.options.scales.x.ticks.color = textColor;
+    if (chart.options.scales?.y?.ticks) chart.options.scales.y.ticks.color = textColor;
+    if (chart.options.plugins?.tooltip) {
+      chart.options.plugins.tooltip.backgroundColor = isDark ? '#252523' : '#ffffff';
+      chart.options.plugins.tooltip.titleColor = isDark ? '#f0f0ec' : '#1a1a1a';
+      chart.options.plugins.tooltip.bodyColor = isDark ? '#b0afa8' : '#5a5a55';
+      chart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+    }
+    chart.update();
+    return;
+  }
 
   chartInstances[key] = new Chart(canvas, {
     type: "line",
@@ -391,7 +441,7 @@ function renderCodecsPage() {
     if (!info) continue;
     const pct = Math.max(10, Math.round((info.bitrate_kbps / 990) * 100));
     const active = current === name;
-    barsHtml += `<div class="bar-row${active ? " active" : ""}"><span class="bar-name">${name}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${info.color}">${active ? "current" : ""}</span></span><span class="bar-rate">${info.bitrate_kbps} kbps</span></div>`;
+    barsHtml += `<div class="bar-row${active ? " active" : ""}"><span class="bar-name">${name}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${CMUtils.safeColor(info.color)}">${active ? "current" : ""}</span></span><span class="bar-rate">${info.bitrate_kbps} kbps</span></div>`;
     detailHtml += `<section class="card codec-detail-card">${eduHtml(info.paragraphs, info.title + (active ? " — currently active" : ""))}</section>`;
   }
   barsEl.innerHTML = barsHtml;
@@ -494,12 +544,16 @@ function showExportModal() {
       <button class="btn-save" id="export-pdf-btn"><i class="ti ti-file-type-pdf" aria-hidden="true"></i> PDF</button>
       <p id="export-msg" class="sub" style="margin-top:4px">&nbsp;</p>
     </div>`);
-  const msg = document.getElementById("export-msg");
   const run = fmt => {
-    msg.textContent = "Saving…";
+    const msg = document.getElementById("export-msg");
+    if (msg) msg.textContent = "Saving…";
     window.pywebview.api.export_report(fmt).then(res => {
-      msg.textContent = res.ok ? `Saved to ${res.path}` : (res.error === "cancelled" ? "Cancelled." : `Failed: ${res.error}`);
-    }).catch(() => { msg.textContent = "Failed to export."; });
+      const activeMsg = document.getElementById("export-msg");
+      if (activeMsg) activeMsg.textContent = res.ok ? `Saved to ${res.path}` : (res.error === "cancelled" ? "Cancelled." : `Failed: ${res.error}`);
+    }).catch(() => {
+      const activeMsg = document.getElementById("export-msg");
+      if (activeMsg) activeMsg.textContent = "Failed to export.";
+    });
   };
   document.getElementById("export-csv-btn").addEventListener("click", () => run("csv"));
   document.getElementById("export-md-btn").addEventListener("click", () => run("md"));
@@ -549,6 +603,17 @@ function renderSnapshot(snap) {
     }
     const el = document.getElementById("uptime-since");
     if (el) el.textContent = `since ${new Date(device.connect_epoch * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  } else {
+    connectEpoch = null;
+    lastDeviceName = null;
+    if (uptimeInterval) {
+      clearInterval(uptimeInterval);
+      uptimeInterval = null;
+    }
+    const mUptime = document.getElementById("m-uptime");
+    if (mUptime) mUptime.textContent = "00:00:00";
+    const uptimeSince = document.getElementById("uptime-since");
+    if (uptimeSince) uptimeSince.textContent = "";
   }
 
   document.getElementById("dev-name").textContent = device?.name || "No device";
@@ -641,6 +706,18 @@ function renderSnapshot(snap) {
 function setConnected(on) {
   wsConnected = on;
   updateSystemHealth();
+  if (!on) {
+    connectEpoch = null;
+    lastDeviceName = null;
+    if (uptimeInterval) {
+      clearInterval(uptimeInterval);
+      uptimeInterval = null;
+    }
+    const mUptime = document.getElementById("m-uptime");
+    if (mUptime) mUptime.textContent = "00:00:00";
+    const uptimeSince = document.getElementById("uptime-since");
+    if (uptimeSince) uptimeSince.textContent = "";
+  }
 }
 
 function connect() {
@@ -676,7 +753,7 @@ function connect() {
         t: snap.server_epoch, codec: snap.codec.name, bitrate: snap.codec.bitrate_kbps,
         device: snap.device?.name, mac: snap.device?.mac, battery: snap.device?.battery, type: snap.device?.type,
       });
-      if (historyData.length > 2200) historyData = historyData.slice(-2000);
+      historyData = CMUtils.trimHistory(historyData, MAX_HISTORY, MAX_HISTORY);
     } else if (msg.type === "alerts") {
       for (const a of msg.data) {
         alertsLog.push(a);

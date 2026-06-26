@@ -73,7 +73,8 @@ def _signal_existing_instance() -> bool:
     try:
         with socket.create_connection(("127.0.0.1", PORT_CONTROL), timeout=0.3) as s:
             s.sendall(b"show")
-        return True
+            resp = s.recv(32)
+            return resp == b"codec-monitor-ack"
     except OSError:
         return False
 
@@ -95,9 +96,15 @@ def _start_control_listener():
         while True:
             try:
                 conn, _ = srv.accept()
-                conn.recv(16)
+                data = conn.recv(16)
+                if data == b"show":
+                    try:
+                        conn.sendall(b"codec-monitor-ack")
+                    except Exception:
+                        pass
                 conn.close()
-                _show_window()
+                if data == b"show":
+                    _show_window()
             except OSError:
                 # srv was closed (shutdown) — exit the loop instead of spinning.
                 break
@@ -120,7 +127,9 @@ def get_resource_path(relative_path):
 def _make_icon_image():
     icon_path = get_resource_path("icon.png")
     if os.path.exists(icon_path):
-        return Image.open(icon_path)
+        with Image.open(icon_path) as img:
+            img.load()
+            return img
     # fallback if not found
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -170,13 +179,22 @@ def _check_window_visible():
         native = getattr(_window, "native", None)
         if native is None:
             return None
-        state = str(getattr(native, "WindowState", ""))
-        if "Minimized" in state:
-            return False
-        visible = getattr(native, "Visible", None)
-        if visible is False:
-            return False
-        return True
+
+        def get_vis_state():
+            state = str(getattr(native, "WindowState", ""))
+            if "Minimized" in state:
+                return False
+            visible = getattr(native, "Visible", None)
+            if visible is False:
+                return False
+            return True
+
+        if getattr(native, "InvokeRequired", False):
+            import System
+            func_delegate = System.Func[bool](get_vis_state)
+            return native.Invoke(func_delegate)
+        else:
+            return get_vis_state()
     except Exception:
         return None
 
@@ -195,7 +213,10 @@ def _terminate():
         except OSError:
             pass
     if _icon:
-        _icon.stop()
+        try:
+            _icon.stop()
+        except Exception:
+            pass
     os._exit(0)
 
 
@@ -236,11 +257,13 @@ def main():
     monitor.start_backend()
     threading.Thread(target=_run_ws_server_thread, daemon=True).start()
 
+    start_min = bool(monitor.get_settings().get("start_minimized", False))
     _window = webview.create_window(
         "Codec Monitor",
         f"http://127.0.0.1:{monitor.PORT_HTTP}/",
         width=1000, height=850, min_size=(700, 600),
         js_api=JsApi(),
+        hidden=start_min,
     )
     _window.events.closing += _on_closing
     _window.events.shown += lambda: monitor.set_window_visible(True)

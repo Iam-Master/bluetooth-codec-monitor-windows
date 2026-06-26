@@ -17,6 +17,7 @@ backend/device_photos/*
 
 # Test artifacts
 backend/test_export_output.csv
+.pytest_cache/
 
 # IDE / OS
 .vscode/
