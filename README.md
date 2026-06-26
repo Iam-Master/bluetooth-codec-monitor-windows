@@ -6,6 +6,8 @@ Real-time Bluetooth audio codec monitor for Windows. See exactly which codec (SB
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
+![Codec Monitor dashboard](screenshots/dashboard.png)
+
 ## Features
 
 - **Real codec detection** — reads the actual negotiated codec from the Alternative A2DP Driver registry (no hardcoded values)
