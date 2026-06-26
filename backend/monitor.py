@@ -1981,7 +1981,13 @@ def _ws_origin_allowed(origin):
 
 
 async def ws_handler(websocket):
-    origin = websocket.request_headers.get("Origin")
+    # websockets v16 uses websocket.request.headers; older versions use
+    # websocket.request_headers. Support both for robustness.
+    try:
+        headers = websocket.request.headers
+    except AttributeError:
+        headers = getattr(websocket, "request_headers", {})
+    origin = headers.get("Origin")
     if not _ws_origin_allowed(origin):
         await websocket.close(code=1008, reason="origin not allowed")
         return
