@@ -13,6 +13,7 @@ import collections
 import ctypes
 from ctypes import wintypes
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -588,6 +589,39 @@ def find_active_alt_a2dp_device() -> dict | None:
 
 # ---------- Device photo fetching (generic — works for any device) ----------
 
+def _is_safe_image_url(url: str) -> bool:
+    """Defense-in-depth for the device-photo fetch (SSRF hardening).
+
+    The image URL ultimately comes from DuckDuckGo image results, so it is not
+    pinned to a domain allowlist (image CDNs vary), but we refuse anything that
+    is not a plain https:// URL to a *public* host. This blocks fetches aimed at
+    internal/metadata services (127.0.0.1, 169.254.169.254, 10/172.16/192.168
+    ranges, etc.) and non-web schemes (file:, data:, ftp:, ...). Only the literal
+    host is checked; DNS-rebinding is out of scope for this low-severity, blind-
+    GET path (the downloaded bytes are never returned to any caller).
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname (not an IP literal) — reject obvious internal names.
+        host_l = host.lower()
+        if host_l == "localhost" or host_l.endswith((".localhost", ".local", ".internal", ".lan")):
+            return False
+        return True
+    # IP literal — only allow globally-routable addresses (rejects loopback,
+    # private, link-local, reserved, multicast).
+    return ip.is_global
+
+
 def _search_device_image_url(device_name: str) -> str | None:
     """Search DuckDuckGo for a product image of the given device.
 
@@ -640,7 +674,7 @@ def _search_device_image_url(device_name: str) -> str | None:
             url = r.get("image", "")
             source_url = r.get("url", "").lower()
             
-            if url and url.startswith("http"):
+            if url and _is_safe_image_url(url):
                 # Ensure the source webpage is from the brand or a trusted review site
                 if any(domain in source_url for domain in reputable_domains):
                     return url
@@ -828,7 +862,7 @@ def fetch_photo_for_device(device_name: str):
         if get_photo_path(device_name):
             return
         url = _search_device_image_url(device_name)
-        if not url:
+        if not url or not _is_safe_image_url(url):
             return
         ext = "jpg" if (".jpg" in url or ".jpeg" in url) else "webp" if ".webp" in url else "png"
         dest = PHOTOS_DIR / f"{slug(device_name)}.{ext}"
