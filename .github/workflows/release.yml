@@ -34,59 +34,11 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           & $iscc installer.iss
 
-      - name: Extract changelog section for this release
-        id: changelog
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          $content = Get-Content CHANGELOG.md -Raw
-          $pattern = "(?ms)^## \[$([regex]::Escape($version))\].*?(?=^## \[|\z)"
-          $m = [regex]::Match($content, $pattern)
-          $notes = if ($m.Success) { $m.Value.Trim() } else { "See CHANGELOG.md for details." }
-          Write-Host "Matched: $($m.Success) - notes length: $($notes.Length)"
-          $delimiter = "EOF_$([guid]::NewGuid().ToString('N'))"
-          $block = "notes<<$delimiter" + "`n" + $notes + "`n" + $delimiter + "`n"
-          # Add-Content's default encoding has been unreliable for the GITHUB_OUTPUT
-          # parser on this runner image; write raw UTF-8 (no BOM) via .NET directly.
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, $block, $utf8NoBom)
-
-      - name: Delete existing release for this tag (avoids stale-body reuse)
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $headers = @{ Authorization = "token $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
-          $relId = $null
-          try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers -Method Get -ErrorAction Stop
-            $relId = $rel.id
-            Write-Host "Found existing release id $relId for tag $tag"
-          } catch {
-            Write-Host "GET failed (no existing release, or lookup error): $($_.Exception.Message)"
-          }
-          if ($relId) {
-            try {
-              # Invoke-WebRequest (not -RestMethod) — a 204 No Content response
-              # makes Invoke-RestMethod throw trying to parse an empty JSON body,
-              # which was silently swallowed by a too-broad catch before.
-              $resp = Invoke-WebRequest -Uri "https://api.github.com/repos/${{ github.repository }}/releases/$relId" -Headers $headers -Method Delete -ErrorAction Stop
-              Write-Host "Delete response status: $($resp.StatusCode)"
-            } catch {
-              Write-Host "DELETE FAILED for release $relId : $($_.Exception.Message)"
-              if ($_.Exception.Response) {
-                Write-Host "HTTP status: $([int]$_.Exception.Response.StatusCode)"
-              }
-            }
-          }
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/Codec Monitor.exe
             dist/CodecMonitor-Setup.exe
-          body: ${{ steps.changelog.outputs.notes }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
