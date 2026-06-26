@@ -2,6 +2,12 @@
 
 All notable changes to Codec Monitor will be documented in this file.
 
+## [1.1.2] - 2026-06-26
+
+### Fixed
+- **App failed to start (stuck on "Backend offline")** — the WebSocket handler crashed on every connection in the packaged build because websockets 16 renamed `request_headers` to `request.headers`; now uses the current API with a fallback
+- **Active device did not follow the Windows default output** — when switching the output between two Bluetooth headphones, the dashboard stayed on the first-connected device. `_name_match_score` now prefers an exact endpoint-name match (Windows names like "Headphones (X)" no longer collide on the shared "Headphones" prefix), and the default-output match now considers endpoints regardless of their reported `Status`
+
 ## [1.1.1] - 2026-06-26
 
 ### Security

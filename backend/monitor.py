@@ -63,7 +63,7 @@ PHOTOS_DIR.mkdir(exist_ok=True)
 
 PORT_HTTP = 8765
 PORT_WS = 8766
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 CODEC_INFO = json.loads(INFO_PATH.read_text(encoding="utf-8"))
 
@@ -1432,7 +1432,18 @@ def _name_match_score(a: str, b: str) -> int | None:
     whichever happens to come first — e.g. two paired devices "Buds" and
     "Buds Pro" no longer get each other's battery/codec mixed up just
     because "Buds" is a substring of "Buds Pro"."""
-    a_l, b_l = a.lower(), b.lower()
+    a_l, b_l = a.lower().strip(), b.lower().strip()
+    if not a_l or not b_l:
+        return None
+    # Exact full-string equality is the strongest signal. This is critical when
+    # choosing among Windows endpoint names that share a prefix, e.g.
+    # "Headphones (CMF Buds 2 Plus)" vs "Headphones (OPPO Enco Air3 Pro)": both
+    # have the base "Headphones" (everything before " ("), so the base check
+    # below ties them and _best_name_match would keep whichever was listed
+    # first — which made the dashboard stick to the first-connected device after
+    # the user switched the output to the other one.
+    if a_l == b_l:
+        return 2_000_000
     a_base = a_l.split(" (")[0]
     b_base = b_l.split(" (")[0]
     if a_base == b_base:
@@ -1518,10 +1529,17 @@ def build_snapshot_from_raw(raw: dict) -> dict:
         # Status=OK simultaneously (see get_currently_connected_bt_devices),
         # so "first one in the list" isn't reliably "the one actually playing".
         default_name = get_default_playback_device_name()
-        candidates = bt_endpoints + hp_endpoints + spk_endpoints
         active_ep = None
         if default_name:
-            active_ep = _best_name_match(default_name, candidates, name_key=lambda e: e["name"])
+            # Match the live default output (pycaw, instant) by NAME against ALL
+            # endpoints, including Status != "OK". Windows frequently reports a
+            # Bluetooth endpoint as "Unknown" even while it IS the selected
+            # output, and the OK-only candidate list also lags the slow
+            # PowerShell poller — both caused the dashboard to stay on the
+            # previously-active device after a switch (it fell back to the first
+            # OK endpoint). pycaw already confirmed this is the live default, so
+            # trust the name match over the stale per-endpoint Status flag.
+            active_ep = _best_name_match(default_name, all_outputs, name_key=lambda e: e["name"])
         if active_ep is None:
             active_ep = (bt_endpoints or hp_endpoints or spk_endpoints or [None])[0]
 
