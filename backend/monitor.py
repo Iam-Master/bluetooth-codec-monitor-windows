@@ -32,7 +32,7 @@ from pathlib import Path
 import contextlib
 import html
 import io
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 
 import websockets
 from win11toast import toast as _win_toast
@@ -824,22 +824,16 @@ def slug(name: str) -> str:
 
 
 def remove_white_background(img_data: bytes) -> bytes:
-    """Load image bytes, convert near-white pixels to transparent, and return as PNG bytes."""
+    """Load image bytes, convert background to transparent using floodfill from corners, and return as PNG bytes."""
     try:
         img = Image.open(io.BytesIO(img_data)).convert("RGBA")
-        r, g, b, a = img.split()
-        # Create masks where R, G, B are all very close to white (> 240)
-        r_mask = r.point(lambda p: 255 if p > 240 else 0)
-        g_mask = g.point(lambda p: 255 if p > 240 else 0)
-        b_mask = b.point(lambda p: 255 if p > 240 else 0)
-        # Intersect masks
-        white_mask = ImageChops.darker(ImageChops.darker(r_mask, g_mask), b_mask)
-        # Invert: 0 where white, 255 where not
-        alpha_mask = white_mask.point(lambda p: 0 if p == 255 else 255)
-        # Combine with original alpha
-        new_a = ImageChops.darker(a, alpha_mask)
-        img.putalpha(new_a)
-        
+        width, height = img.size
+        # Perform floodfill from the 4 corners
+        for x, y in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]:
+            color = img.getpixel((x, y))
+            # Only floodfill if the corner pixel is not already transparent
+            if color[3] > 0:
+                ImageDraw.floodfill(img, (x, y), (0, 0, 0, 0), thresh=30)
         # Save as PNG
         out = io.BytesIO()
         img.save(out, format="PNG")
