@@ -31,6 +31,8 @@ from datetime import datetime
 from pathlib import Path
 import contextlib
 import html
+import io
+from PIL import Image, ImageChops
 
 import websockets
 from win11toast import toast as _win_toast
@@ -821,6 +823,52 @@ def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
+def remove_white_background(img_data: bytes) -> bytes:
+    """Load image bytes, convert near-white pixels to transparent, and return as PNG bytes."""
+    try:
+        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        r, g, b, a = img.split()
+        # Create masks where R, G, B are all very close to white (> 240)
+        r_mask = r.point(lambda p: 255 if p > 240 else 0)
+        g_mask = g.point(lambda p: 255 if p > 240 else 0)
+        b_mask = b.point(lambda p: 255 if p > 240 else 0)
+        # Intersect masks
+        white_mask = ImageChops.darker(ImageChops.darker(r_mask, g_mask), b_mask)
+        # Invert: 0 where white, 255 where not
+        alpha_mask = white_mask.point(lambda p: 0 if p == 255 else 255)
+        # Combine with original alpha
+        new_a = ImageChops.darker(a, alpha_mask)
+        img.putalpha(new_a)
+        
+        # Save as PNG
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception as e:
+        print(f"Failed to remove white background: {e}")
+        return img_data
+
+
+def migrate_existing_photos():
+    """Convert any existing cached JPG/WEBP/PNG files to transparent PNGs."""
+    try:
+        for fpath in PHOTOS_DIR.iterdir():
+            if fpath.is_file() and fpath.name != ".gitkeep":
+                if fpath.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png"):
+                    try:
+                        img_data = fpath.read_bytes()
+                        processed_data = remove_white_background(img_data)
+                        dest_png = fpath.with_suffix(".png")
+                        _write_photo_atomic(dest_png, processed_data)
+                        if fpath.suffix.lower() != ".png":
+                            fpath.unlink()
+                        print(f"  Migrated photo background to transparent PNG: {fpath.name} -> {dest_png.name}")
+                    except Exception as ex:
+                        print(f"  Failed to migrate photo {fpath.name}: {ex}")
+    except Exception as e:
+        print(f"  Error migrating photos: {e}")
+
+
 def get_photo_path(device_name: str) -> str | None:
     if not device_name:
         return None
@@ -864,8 +912,7 @@ def fetch_photo_for_device(device_name: str):
         url = _search_device_image_url(device_name)
         if not url or not _is_safe_image_url(url):
             return
-        ext = "jpg" if (".jpg" in url or ".jpeg" in url) else "webp" if ".webp" in url else "png"
-        dest = PHOTOS_DIR / f"{slug(device_name)}.{ext}"
+        dest = PHOTOS_DIR / f"{slug(device_name)}.png"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "CodecMonitor/1.0"})
             with urllib.request.urlopen(req, timeout=8) as resp:
@@ -875,8 +922,9 @@ def fetch_photo_for_device(device_name: str):
                     return
                 data = resp.read(2 * 1024 * 1024)
             if len(data) > 500:
-                _write_photo_atomic(dest, data)
-                print(f"  Photo cached: {dest.name} ({len(data)} bytes)")
+                processed_data = remove_white_background(data)
+                _write_photo_atomic(dest, processed_data)
+                print(f"  Photo cached and background removed: {dest.name} ({len(processed_data)} bytes)")
         except Exception as e:
             print(f"  Photo fetch failed for {device_name}: {e}")
 
@@ -2052,6 +2100,7 @@ def start_backend():
     load_settings()
     init_history_db()
     load_recent_history_into_memory()
+    migrate_existing_photos()
     # HTTP server starts first and on its own thread so the window has something
     # to load immediately — photo prefetch is a nice-to-have, not a blocker.
     threading.Thread(target=run_http_server, daemon=True).start()
