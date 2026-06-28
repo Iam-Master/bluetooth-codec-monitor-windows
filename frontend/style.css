@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light dark;
   --bg: #ffffff;
   --bg2: #F4F2EC;
   --bg3: #ECEAE3;
@@ -28,7 +29,8 @@
   --card-bg: var(--bg);
 }
 
-body[data-theme="dark"] {
+body[data-theme="dark"], [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #1c1c1b;
   --bg2: #252523;
   --bg3: #2f2f2c;

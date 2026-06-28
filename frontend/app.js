@@ -54,6 +54,7 @@ const MAX_HISTORY = 2200;
 
 // ==================== Theme (light/dark) ====================
 function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
   document.body.dataset.theme = t;
   document.querySelectorAll(".theme2 button").forEach(b =>
     b.classList.toggle("on", b.dataset.theme === t));
