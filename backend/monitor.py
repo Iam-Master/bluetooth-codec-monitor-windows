@@ -32,7 +32,8 @@ from pathlib import Path
 import contextlib
 import html
 import io
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageStat
+from PIL.PngImagePlugin import PngInfo
 
 import websockets
 from win11toast import toast as _win_toast
@@ -65,6 +66,12 @@ PHOTOS_DIR.mkdir(exist_ok=True)
 
 PORT_HTTP = 8765
 PORT_WS = 8766
+
+# Bumped whenever remove_white_background()'s algorithm changes meaningfully,
+# so already-cached photos produced by an older, less robust pass get
+# reprocessed once (see _photo_needs_reprocessing / _reprocess_outdated_photos)
+# instead of being stuck with whatever cutout quality they happened to get.
+BG_REMOVE_ALGO_VERSION = 5
 APP_VERSION = "1.1.2"
 
 CODEC_INFO = json.loads(INFO_PATH.read_text(encoding="utf-8"))
@@ -624,24 +631,36 @@ def _is_safe_image_url(url: str) -> bool:
     return ip.is_global
 
 
-def _search_device_image_url(device_name: str) -> str | None:
-    """Search DuckDuckGo for a product image of the given device.
+def _search_device_image_urls(device_name: str) -> list[str]:
+    """Search DuckDuckGo for product images of the given device.
 
-    Verifies that the image comes from an official brand source or a
-    reputable tech site to ensure correctness. Returns the first verified
-    image URL found, or None.
+    Verifies that each image comes from an official brand source or a
+    reputable tech/retail site AND that the result's own title actually
+    names the device, to ensure correctness. Returns verified image URLs
+    ranked best-match-first (not just the single best one) — CDN links
+    found via search occasionally 404 by the time we actually fetch them,
+    so the caller needs a fallback list to try instead of giving up
+    entirely after one dead link.
     """
     query = f"{device_name} bluetooth product photo"
 
-    # Fixed allowlist of known review/retail sites only — deliberately does NOT
-    # include anything derived from device_name (which ultimately comes from a
-    # Bluetooth FriendlyName that any nearby device can advertise), since that
-    # would let an attacker-controlled device name add itself to the trusted
-    # set and steer which "verified" source URLs get accepted.
+    # Fixed allowlist of known review/retail/manufacturer sites only —
+    # deliberately does NOT include anything derived from device_name (which
+    # ultimately comes from a Bluetooth FriendlyName that any nearby device
+    # can advertise), since that would let an attacker-controlled device name
+    # add itself to the trusted set and steer which "verified" source URLs
+    # get accepted. Includes manufacturer domains and the major Indian/global
+    # retailers that actually carry these devices — a narrower, western-only
+    # list (the original) meant common devices had no reputable hit at all
+    # and silently never got a photo.
     reputable_domains = [
         "rtings.com", "soundguys.com", "head-fi.org", "whathifi.com",
         "techradar.com", "theverge.com", "cnet.com", "tomsguide.com",
-        "amazon.com", "bestbuy.com", "gsmarena.com",
+        "amazon.com", "amazon.in", "bestbuy.com", "gsmarena.com",
+        "flipkart.com", "croma.com", "reliancedigital.in", "91mobiles.com",
+        "gadgets360.com", "digit.in", "smartprix.com", "pricebaba.com",
+        "oppo.com", "realme.com", "nothing.tech", "samsung.com", "sony.com",
+        "jbl.com", "oneplus.com", "mi.com", "boat-lifestyle.com",
     ]
 
     try:
@@ -670,19 +689,83 @@ def _search_device_image_url(device_name: str) -> str | None:
         with urllib.request.urlopen(req2, timeout=5) as resp2:
             data = json.loads(resp2.read().decode("utf-8", errors="replace"))
         
-        # Step 3: Verify the results
-        results = data.get("results", [])
-        for r in results:
+        # Step 3: Verify the results. A reputable source domain alone isn't
+        # enough — DuckDuckGo's image results are often only loosely related
+        # to the query, so without also checking that the result's title
+        # actually names the device, a generic "wireless earbuds" listing
+        # from an allowlisted retailer could get cached as if it were a
+        # photo of an entirely different product.
+        name_tokens = [t for t in re.split(r"\s+", device_name.lower()) if len(t) >= 2]
+        name_token_set = set(name_tokens)
+        # Generic words that show up in almost every retailer title and
+        # shouldn't count against a candidate when scoring how closely its
+        # title matches the device — otherwise "Buy X TWS Earbuds with..."
+        # titles would all look equally (ir)relevant.
+        FILLER_WORDS = {
+            "buy", "tws", "earbuds", "earphones", "headphones", "headset",
+            "bluetooth", "wireless", "true", "with", "the", "and", "for",
+            "in", "ear", "global", "specifications", "specs", "accessories",
+            "audifonos", "auriculares", "tai", "nghe",
+        }
+        candidates = []
+        for r in data.get("results", []):
             url = r.get("image", "")
             source_url = r.get("url", "").lower()
-            
-            if url and _is_safe_image_url(url):
-                # Ensure the source webpage is from the brand or a trusted review site
-                if any(domain in source_url for domain in reputable_domains):
-                    return url
+            title = r.get("title", "").lower()
+
+            if not (url and _is_safe_image_url(url)):
+                continue
+            if not any(domain in source_url for domain in reputable_domains):
+                continue
+            # Forum/community subdomains (bbs.oppo.com, forum.xda-developers,
+            # etc.) are user-uploaded content, not manufacturer product
+            # assets — even on an otherwise-reputable domain, a post titled
+            # exactly with the device name can attach a completely unrelated
+            # image (a teardown photo, a driver diagram, a meme). They also
+            # tend to win the "fewest extra words" ranking below precisely
+            # because a terse forum post title has nothing else in it, so
+            # they must be excluded outright rather than just de-prioritized.
+            hostname = urllib.parse.urlparse(r.get("url", "")).hostname or ""
+            first_label = hostname.split(".")[0].lower()
+            if first_label.startswith(("bbs", "forum", "community", "discuss", "answers", "ask")):
+                continue
+            if name_tokens and not all(tok in title for tok in name_tokens):
+                continue
+            # Prefer the title that names the device most exactly — e.g. for
+            # "OPPO Enco Buds", an official page titled "OPPO Enco Buds" should
+            # win over "OPPO Enco Buds 2", which also happens to contain every
+            # token of the (shorter) device name as a substring.
+            title_words = set(re.findall(r"[a-z0-9]+", title))
+            extra_words = title_words - name_token_set - FILLER_WORDS
+            # Manufacturer product pages mix the actual product photo with
+            # technical/feature-illustration tiles (a driver cutaway diagram,
+            # a touch-gesture graphic, a connectivity-range graphic) under the
+            # same official domain and an equally legitimate device-name
+            # title — domain trust and title matching can't tell those apart
+            # from a real product photo. De-prioritize (not exclude — a real
+            # photo occasionally lives at a path like this too) candidates
+            # whose own URL suggests a spec/feature graphic rather than a
+            # product shot.
+            spec_graphic_penalty = 3 if re.search(
+                r"feature|spec|callout|highlight|tile|intellect|fingertip|ksp|driver|diaphragm|chip|sensor|/grid/",
+                url.lower(),
+            ) else 0
+            # Same idea for "lifestyle" shots that show the product inside a
+            # phone's companion-app screenshot (a connect/pairing screen, a
+            # battery widget) rather than the product itself — a legitimate
+            # official asset, but a phone-in-frame is a poor fit for a small
+            # square device-card thumbnail.
+            lifestyle_penalty = 3 if re.search(
+                r"screen|app[-_]?connect|pairing|companion|widget|notification",
+                url.lower() + " " + title,
+            ) else 0
+            candidates.append((len(extra_words) + spec_graphic_penalty + lifestyle_penalty, url))
+
+        candidates.sort(key=lambda c: c[0])
+        return [url for _, url in candidates]
     except Exception as e:
         print(f"  Image search failed for '{device_name}': {e}")
-    return None
+    return []
 
 BT_EXCLUSION_REGEX = r"Generic|Profile|^Bluetooth LE|Service|Enumerator|Transport|Avrcp|RFCOMM|Microsoft Bluetooth|Personal Area|Identification|Standard Serial|Wireless Bluetooth|Bluetooth Adapter|Bluetooth Radio|Bluetooth Module"
 
@@ -728,10 +811,21 @@ def get_history_seen_device_names() -> list[str]:
     return [r[0] for r in rows]
 
 _DEVICE_NAME_WRAPPER_RE = re.compile(r"^(?:headset|headphones|hands-?free.*?)\s*\((.+)\)$", re.IGNORECASE)
+# Windows/the Bluetooth stack sometimes bakes the active profile into the
+# FriendlyName itself (not just the "Headset (...)" wrapper above) — e.g. a
+# device shows up in history as "CMF Buds 2 Plus Hands-Free" while its A2DP
+# audio endpoint is plain "CMF Buds 2 Plus". Left alone, that suffix makes
+# the lowercase-equality dedup in get_all_known_device_names() treat them as
+# two different devices, so the same physical earbuds show up twice on the
+# Devices page.
+_DEVICE_NAME_PROFILE_SUFFIX_RE = re.compile(
+    r"\s+(?:hands-?free(?:\s*ag)?|avrcp\s*transport|a2dp\s*sink|hfp|hsp)$", re.IGNORECASE
+)
 
 def _clean_device_name(name: str) -> str:
     m = _DEVICE_NAME_WRAPPER_RE.match(name.strip())
-    return m.group(1).strip() if m else name.strip()
+    cleaned = m.group(1).strip() if m else name.strip()
+    return _DEVICE_NAME_PROFILE_SUFFIX_RE.sub("", cleaned).strip()
 
 def get_all_known_device_names() -> list[str]:
     raw = get_known_device_names() + get_history_seen_device_names() + get_windows_paired_bt_names()
@@ -823,62 +917,244 @@ def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
-def remove_white_background(img_data: bytes) -> bytes:
-    """Load image bytes, convert background to transparent using mask-based floodfill, and return as PNG bytes."""
+def _estimate_background_color(rgb_img: "Image.Image") -> tuple[tuple[int, int, int], float]:
+    """Sample the image border to estimate the studio background color.
+
+    Product photos almost always have padding around the product, so the
+    border is overwhelmingly background pixels even when the product touches
+    one edge. Using the *mode* of (quantized) border colors instead of
+    assuming pure white means off-white/cream/grey studio backgrounds get
+    detected too, not just (255,255,255).
+
+    Also returns a confidence score (fraction of border samples matching the
+    detected color) — some search results turn out to be a marketing graphic
+    with patterned/illustrated edges rather than a plain studio backdrop, and
+    background removal on those does more harm than good. A low confidence
+    here is the signal to skip removal entirely instead of attempting it on
+    a non-uniform border.
+    """
+    w, h = rgb_img.size
+    step = max(1, min(w, h) // 200)
+    samples = []
+    for x in range(0, w, step):
+        samples.append(rgb_img.getpixel((x, 0)))
+        samples.append(rgb_img.getpixel((x, h - 1)))
+    for y in range(0, h, step):
+        samples.append(rgb_img.getpixel((0, y)))
+        samples.append(rgb_img.getpixel((w - 1, y)))
+    if not samples:
+        return (255, 255, 255), 0.0
+    quantized = collections.Counter(tuple((c // 8) * 8 for c in s) for s in samples)
+    color, count = quantized.most_common(1)[0]
+    return color, count / len(samples)
+
+
+def remove_white_background(img_data: bytes) -> tuple[bytes, bool]:
+    """Convert a product photo's studio background to transparency.
+
+    Returns (png_bytes, removed) — png_bytes is always tagged with the
+    algorithm version that produced it; removed is False when background
+    removal was skipped (non-uniform/non-studio border, or the estimate
+    looked unreliable) and the image was kept opaque as-is. Callers that are
+    choosing between several candidate photos use this to skip a technically-
+    valid-but-unremovable image (e.g. a marketing graphic) in favor of a
+    candidate that's an actual clean product cutout.
+
+    Two earlier approaches both failed on real product photography:
+
+    1. A pure-white-only corner flood-fill left soft shadows/off-white
+       backgrounds untouched — invisible on a light theme, a hard box once
+       the UI went dark.
+    2. A tolerance-based flood-fill (binary mask, hard fill-or-not) produced
+       jagged "torn paper" edges (a binary threshold has no in-between, so
+       compression noise right at the boundary flickers pixel-by-pixel
+       between kept/cut) and, when the tolerance or any dilation was wide
+       enough to bridge real gaps (e.g. a case rim next to its earbud
+       cavity), it flooded straight through the product's own seams and
+       punched holes in glossy/light-colored parts of the product itself.
+
+    This version avoids both failure modes:
+    - A *soft* per-pixel alpha ramp (not a binary mask) by color distance
+      from the estimated background, so antialiasing/noise near the
+      boundary fades smoothly instead of flickering.
+    - No mask dilation at all, so nothing can flood-fill through a narrow
+      product seam.
+    - A separate connected-component pass that only trusts "this is
+      background" for pixels connected to the image border — actual studio
+      backgrounds always touch the edges of the photo, so an isolated
+      patch deep inside the product that happens to be background-colored
+      (a glossy highlight, a white logo) is NOT treated as background, no
+      matter how close its color is. This is what stopped the holes without
+      needing to tighten the tolerance so much that real background got
+      left behind again.
+    """
     try:
         img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         width, height = img.size
-        
-        # Split channels to extract R, G, B, A
-        r, g, b, a = img.split()
-        
-        # Create a binary mask of near-white pixels (where R, G, B channels are all > 220)
-        r_mask = r.point(lambda p: 255 if p > 220 else 0)
-        g_mask = g.point(lambda p: 255 if p > 220 else 0)
-        b_mask = b.point(lambda p: 255 if p > 220 else 0)
-        white_mask = ImageChops.darker(ImageChops.darker(r_mask, g_mask), b_mask)
-        
-        # Explicitly force corner pixels to be white (255) in the mask so floodfill can start
-        for x, y in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]:
-            white_mask.putpixel((x, y), 255)
-            
-        # Floodfill the connected background region with a unique value (128) starting from corners
-        for x, y in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]:
-            if white_mask.getpixel((x, y)) == 255:
-                ImageDraw.floodfill(white_mask, (x, y), 128)
-                
-        # Create an alpha mask: 0 (transparent) where background was filled (128), 255 (opaque) elsewhere
-        alpha_mask = white_mask.point(lambda p: 0 if p == 128 else 255)
-        
-        # Combine with original alpha and apply
-        new_a = ImageChops.darker(a, alpha_mask)
+        rgb = img.convert("RGB")
+
+        # Blur a copy of the RGB image (not just the mask) before measuring
+        # color distance, so compression artifacts don't create per-pixel
+        # noise right at the threshold.
+        smoothed = rgb.filter(ImageFilter.GaussianBlur(1.2))
+        bg_color, bg_confidence = _estimate_background_color(rgb)
+        if bg_confidence < 0.4:
+            # Border isn't a uniform color — likely a marketing graphic
+            # (illustrated background, soundwave/pattern overlay, etc.)
+            # rather than a plain studio photo. Removing "background" here
+            # would mean guessing at a color that isn't really the
+            # background, which is more likely to mangle the image than
+            # help. Leave it opaque.
+            out = io.BytesIO()
+            pnginfo = PngInfo()
+            pnginfo.add_text("bgremove_version", str(BG_REMOVE_ALGO_VERSION))
+            img.save(out, format="PNG", pnginfo=pnginfo)
+            return out.getvalue(), False
+        bg_plane = Image.new("RGB", (width, height), bg_color)
+        dr, dg, db = ImageChops.difference(smoothed, bg_plane).split()
+        dist = ImageChops.lighter(ImageChops.lighter(dr, dg), db)
+
+        # Soft ramp: definitely background below LOW (alpha 0), definitely
+        # product above HIGH (alpha 255), linear blend between — this is
+        # what gives a smooth, anti-aliased edge instead of a jagged one.
+        LOW, HIGH = 24, 56
+
+        def _ramp(p):
+            if p <= LOW:
+                return 0
+            if p >= HIGH:
+                return 255
+            return int((p - LOW) * 255 / (HIGH - LOW))
+
+        soft_alpha = dist.point(_ramp)
+
+        # Connected-component correction: only pixels in the "definitely
+        # background" band that are reachable from the image border via
+        # other near-background pixels count as real background. Nothing is
+        # dilated, so this can't leak through a seam — it can only follow
+        # pixels that were already classified as background-colored.
+        STRICT_BG = 40
+        bg_candidate = dist.point(lambda p: 255 if p <= STRICT_BG else 0)
+        reach = bg_candidate.copy()
+        FILL_MARK = 180
+        for x in range(width):
+            for y in (0, height - 1):
+                if reach.getpixel((x, y)) == 255:
+                    ImageDraw.floodfill(reach, (x, y), FILL_MARK)
+        for y in range(height):
+            for x in (0, width - 1):
+                if reach.getpixel((x, y)) == 255:
+                    ImageDraw.floodfill(reach, (x, y), FILL_MARK)
+        border_connected = reach.point(lambda p: 255 if p == FILL_MARK else 0)
+
+        # Anywhere the soft ramp wanted to cut (alpha < 255) but that pixel
+        # isn't part of the border-connected background blob, force it back
+        # to fully opaque — it's a false positive (highlight/logo), not
+        # actual background.
+        isolated = ImageChops.subtract(bg_candidate, border_connected)
+        soft_alpha = ImageChops.lighter(soft_alpha, isolated)
+
+        # Final light feather for a clean anti-aliased edge.
+        soft_alpha = soft_alpha.filter(ImageFilter.GaussianBlur(0.6))
+
+        transparent_ratio = ImageStat.Stat(soft_alpha.point(lambda p: 255 - p)).sum[0] / 255 / (width * height)
+        if not (0.02 <= transparent_ratio <= 0.92):
+            # Background estimate looks wrong (near-zero or near-total
+            # removal) — keep the original image opaque rather than risk
+            # erasing the product or silently doing nothing.
+            out = io.BytesIO()
+            pnginfo = PngInfo()
+            pnginfo.add_text("bgremove_version", str(BG_REMOVE_ALGO_VERSION))
+            img.save(out, format="PNG", pnginfo=pnginfo)
+            return out.getvalue(), False
+
+        _, _, _, a = img.split()
+        new_a = ImageChops.darker(a, soft_alpha)
         img.putalpha(new_a)
-        
-        # Save as PNG
+
+        # Crop to the bounding box of non-transparent content to remove empty padding/margins
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+
         out = io.BytesIO()
-        img.save(out, format="PNG")
-        return out.getvalue()
+        pnginfo = PngInfo()
+        pnginfo.add_text("bgremove_version", str(BG_REMOVE_ALGO_VERSION))
+        img.save(out, format="PNG", pnginfo=pnginfo)
+        return out.getvalue(), True
     except Exception as e:
         print(f"Failed to remove white background: {e}")
-        return img_data
+        return img_data, False
+
+
+def _photo_algo_version(path) -> int:
+    try:
+        with Image.open(path) as img:
+            return int(img.info.get("bgremove_version", 0))
+    except Exception:
+        return BG_REMOVE_ALGO_VERSION  # unreadable — don't loop retrying forever
+
+
+def _invalidate_outdated_photos():
+    """Delete cached photos produced by an older background-removal pass, so
+    prefetch_photos re-fetches and re-processes them from a fresh original.
+
+    Deliberately does NOT re-run remove_white_background() on the existing
+    file in place — that file's pixels already have transparency baked in
+    from whatever the old algorithm did, and re-estimating a background color
+    from an image that's already partially cut out produces garbage (this is
+    exactly how an earlier version corrupted real photos into a "double
+    exposure" ghosting mess: re-processing already-processed pixels instead
+    of going back to the untouched original). Re-downloading is slightly
+    more network cost but is the only way to guarantee the algorithm always
+    runs on an unmodified source image.
+
+    Runs off the startup-blocking path (called from the same background
+    thread as prefetch_photos), and the version tag means a given photo is
+    only ever invalidated once per algorithm change.
+    """
+    try:
+        for fpath in PHOTOS_DIR.iterdir():
+            if fpath.is_file() and fpath.suffix.lower() == ".png":
+                version = _photo_algo_version(fpath)
+                # version == 0 means no version tag at all, which means this
+                # file was never produced by remove_white_background() — it's
+                # a photo the user manually dropped into device_photos/.
+                # Those must never be touched, only ones our own pipeline
+                # produced with an older algorithm version.
+                if 0 < version < BG_REMOVE_ALGO_VERSION:
+                    try:
+                        fpath.unlink()
+                        print(f"  Invalidated outdated cached photo: {fpath.name}")
+                    except OSError as ex:
+                        print(f"  Failed to invalidate photo {fpath.name}: {ex}")
+    except Exception as e:
+        print(f"  Error invalidating outdated photos: {e}")
 
 
 def migrate_existing_photos():
-    """Convert any existing cached JPG/WEBP/PNG files to transparent PNGs."""
+    """One-time migration: convert legacy JPG/WEBP cached photos (saved before
+    the transparent-PNG feature existed) to transparent PNGs.
+
+    Deliberately does NOT touch existing .png files — those are either already
+    background-removed (by fetch_photo_for_device or a prior run of this
+    migration) or were placed there manually by the user. Reprocessing them on
+    every startup would redo the slow floodfill pass and rewrite the file each
+    time the app launches, which is exactly the multi-second startup delay this
+    migration must not reintroduce.
+    """
     try:
         for fpath in PHOTOS_DIR.iterdir():
-            if fpath.is_file() and fpath.name != ".gitkeep":
-                if fpath.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png"):
-                    try:
-                        img_data = fpath.read_bytes()
-                        processed_data = remove_white_background(img_data)
-                        dest_png = fpath.with_suffix(".png")
-                        _write_photo_atomic(dest_png, processed_data)
-                        if fpath.suffix.lower() != ".png":
-                            fpath.unlink()
-                        print(f"  Migrated photo background to transparent PNG: {fpath.name} -> {dest_png.name}")
-                    except Exception as ex:
-                        print(f"  Failed to migrate photo {fpath.name}: {ex}")
+            if fpath.is_file() and fpath.suffix.lower() in (".jpg", ".jpeg", ".webp"):
+                try:
+                    img_data = fpath.read_bytes()
+                    processed_data, _ = remove_white_background(img_data)
+                    dest_png = fpath.with_suffix(".png")
+                    _write_photo_atomic(dest_png, processed_data)
+                    fpath.unlink()
+                    print(f"  Migrated photo background to transparent PNG: {fpath.name} -> {dest_png.name}")
+                except Exception as ex:
+                    print(f"  Failed to migrate photo {fpath.name}: {ex}")
     except Exception as e:
         print(f"  Error migrating photos: {e}")
 
@@ -923,24 +1199,62 @@ def fetch_photo_for_device(device_name: str):
     with _photo_fetch_lock:
         if get_photo_path(device_name):
             return
-        url = _search_device_image_url(device_name)
-        if not url or not _is_safe_image_url(url):
+        urls = [u for u in _search_device_image_urls(device_name) if _is_safe_image_url(u)]
+        if not urls:
             return
         dest = PHOTOS_DIR / f"{slug(device_name)}.png"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "CodecMonitor/1.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                content_type = resp.headers.get("Content-Type", "")
-                if not content_type.startswith("image/"):
-                    print(f"  Photo fetch rejected for {device_name}: non-image Content-Type '{content_type}'")
+        MAX_BYTES = 8 * 1024 * 1024
+        fallback = None
+        # Try candidates in best-match order — search-result CDN links
+        # occasionally 404 (stale cache, renamed asset) by the time we
+        # actually fetch them, so one dead link shouldn't mean "no photo".
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "CodecMonitor/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+                    if not content_type.startswith("image/"):
+                        print(f"  Photo fetch rejected for {device_name}: non-image Content-Type '{content_type}'")
+                        continue
+                    # Read one byte past the cap so an oversized image is
+                    # detected and rejected outright, instead of being
+                    # silently truncated mid-stream into a corrupt file that
+                    # then sits in the cache forever (get_photo_path only
+                    # checks file size, not that the image actually decodes).
+                    data = resp.read(MAX_BYTES + 1)
+                    if len(data) > MAX_BYTES:
+                        print(f"  Photo fetch rejected for {device_name}: image exceeds {MAX_BYTES} byte cap")
+                        continue
+                if len(data) <= 500:
+                    continue
+                try:
+                    Image.open(io.BytesIO(data)).verify()
+                except Exception as ex:
+                    # A download that doesn't actually decode (truncated,
+                    # corrupted, or the server returned an HTML error page
+                    # with an image/* content-type) must never be written —
+                    # get_photo_path only checks file size, so a corrupt file
+                    # here would look "cached" forever and never get retried.
+                    print(f"  Photo fetch rejected for {device_name}: downloaded data isn't a valid image ({ex})")
+                    continue
+                processed_data, removed = remove_white_background(data)
+                if removed:
+                    _write_photo_atomic(dest, processed_data)
+                    print(f"  Photo cached and background removed: {dest.name} ({len(processed_data)} bytes)")
                     return
-                data = resp.read(2 * 1024 * 1024)
-            if len(data) > 500:
-                processed_data = remove_white_background(data)
-                _write_photo_atomic(dest, processed_data)
-                print(f"  Photo cached and background removed: {dest.name} ({len(processed_data)} bytes)")
-        except Exception as e:
-            print(f"  Photo fetch failed for {device_name}: {e}")
+                # Background removal was skipped (non-uniform border — e.g. a
+                # marketing graphic, not a plain studio photo). Keep it only
+                # as a last resort and keep trying other candidates first,
+                # since a later one is more likely to be an actual clean
+                # product cutout.
+                if fallback is None:
+                    fallback = (dest, processed_data)
+            except Exception as e:
+                print(f"  Photo fetch failed for {device_name} ({url}): {e}")
+        if fallback is not None:
+            fb_dest, fb_data = fallback
+            _write_photo_atomic(fb_dest, fb_data)
+            print(f"  Photo cached without background removal (no clean candidate found): {fb_dest.name}")
 
 
 def _fetch_photo_wrapper(device_name: str):
@@ -955,6 +1269,7 @@ def prefetch_photos():
     """Download photos for all known devices at startup — not just Alt A2DP-
     paired ones, so the Devices page doesn't show generic icons for devices
     that just haven't happened to be the active one yet."""
+    _invalidate_outdated_photos()
     names = get_all_known_device_names()
     for name in names:
         if not get_photo_path(name):

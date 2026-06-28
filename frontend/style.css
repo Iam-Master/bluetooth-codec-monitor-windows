@@ -299,9 +299,20 @@ html, body {
   color: var(--accent);
   overflow: hidden;
 }
+.photo.has-img {
+  /* Cached device photos are studio product shots on a near-white backdrop
+     with the background made transparent on a best-effort basis — the
+     cutout can leave faint near-white leftovers (e.g. a white case lid
+     against a white background has no color edge to key on). Always using
+     a fixed light card here (instead of the theme's --bg2, which goes dark)
+     means those leftovers blend into the card the same way in both themes,
+     instead of turning into a hard dark gap when the theme is dark. */
+  background: transparent;
+  border: none;
+}
 .photo img {
   width: 100%; height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 /* ---- Pills ---- */
