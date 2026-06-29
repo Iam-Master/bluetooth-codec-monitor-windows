@@ -72,7 +72,7 @@ PORT_WS = 8766
 # so already-cached photos produced by an older, less robust pass get
 # reprocessed once (see _photo_needs_reprocessing / _reprocess_outdated_photos)
 # instead of being stuck with whatever cutout quality they happened to get.
-BG_REMOVE_ALGO_VERSION = 7
+BG_REMOVE_ALGO_VERSION = 8
 APP_VERSION = "1.1.2"
 
 CODEC_INFO = json.loads(INFO_PATH.read_text(encoding="utf-8"))
@@ -779,6 +779,8 @@ def _download_and_cache_image(url: str, timeout: float = 3.0) -> bytes | None:
                 ratio = w / h
                 if ratio < 0.75 or ratio > 1.33:
                     return None
+                if w < 120 or h < 120:
+                    return None
             except Exception:
                 return None
             with _downloaded_images_cache_lock:
@@ -787,6 +789,24 @@ def _download_and_cache_image(url: str, timeout: float = 3.0) -> bytes | None:
     except Exception:
         pass
     return None
+
+
+def _clean_image_url(url: str) -> str:
+    """Normalize image URLs to strip resizing parameters and fetch high-res versions."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        # Strip gadgets360 downsizing query params
+        if "gadgets360cdn.com" in parsed.netloc:
+            url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+            
+        # Strip Amazon resizing tokens (e.g. ._SL160_ or .__CR0,0,2388,979_PT0_SX1464_V1___)
+        url = re.sub(r"\._+[^/]*(?=\.[a-zA-Z0-9]+$)", "", url)
+        
+        # Scale up Flipkart thumbnail path sizes (e.g. /128/128/)
+        url = re.sub(r"/image/\d+/\d+/", "/image/832/832/", url)
+    except Exception:
+        pass
+    return url
 
 
 def _search_device_image_urls(device_name: str) -> list[str]:
@@ -861,9 +881,12 @@ def _search_device_image_urls(device_name: str) -> list[str]:
 
         for r in results:
             url = r.get("image", "")
+            if not url:
+                continue
+            url = _clean_image_url(url)
             source_url = r.get("url", "").lower()
             title = r.get("title", "")
-            if not (url and _is_safe_image_url(url)):
+            if not _is_safe_image_url(url):
                 continue
             if not any(domain in source_url for domain in reputable_domains):
                 continue
@@ -1388,7 +1411,17 @@ def fetch_photo_for_device(device_name: str):
                 if len(data) <= 500:
                     continue
                 try:
-                    Image.open(io.BytesIO(data)).verify()
+                    img = Image.open(io.BytesIO(data))
+                    img.verify()
+                    img = Image.open(io.BytesIO(data))
+                    w, h = img.size
+                    ratio = w / h
+                    if ratio < 0.75 or ratio > 1.33:
+                        print(f"  Photo fetch rejected for {device_name}: invalid aspect ratio {ratio:.2f} ({url})")
+                        continue
+                    if w < 120 or h < 120:
+                        print(f"  Photo fetch rejected for {device_name}: image size too small ({w}x{h}) ({url})")
+                        continue
                 except Exception as ex:
                     # A download that doesn't actually decode (truncated,
                     # corrupted, or the server returned an HTML error page

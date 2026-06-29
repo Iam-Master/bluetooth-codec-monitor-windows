@@ -144,3 +144,13 @@ def test_download_and_cache_image_aspect_ratio(monkeypatch):
     res = monitor._download_and_cache_image("https://example.com/square.png")
     assert res is not None  # Should be allowed
 
+    # Mock download of a small square image (50x50, ratio = 1.0)
+    img_small = Image.new("RGB", (50, 50), color="white")
+    buf_small = io.BytesIO()
+    img_small.save(buf_small, format="PNG")
+    
+    monkeypatch.setattr(monitor.urllib.request, "urlopen", lambda *a, **k: MockResponse(buf_small.getvalue()))
+    
+    res = monitor._download_and_cache_image("https://example.com/small.png")
+    assert res is None  # Should be rejected because it is too small (50 < 120)
+
