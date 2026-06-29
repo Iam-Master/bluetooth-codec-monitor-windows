@@ -32,3 +32,6 @@ Desktop.ini
 
 # Command Code
 .commandcode/
+
+# Claude Code
+.claude/
