@@ -193,7 +193,7 @@ html, body {
   font-size: 16px; transition: background 0.1s;
 }
 .icon-btn:hover { background: var(--bg2); color: var(--txt); }
-.icon-btn.muted { color: var(--txt3); opacity: 0.5; }
+.icon-btn.muted { color: var(--bad); opacity: 0.7; background: var(--bad-bg); }
 
 .theme2 {
   display: inline-flex;
@@ -231,6 +231,9 @@ html, body {
 }
 .grid3 {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+}
+.grid3.grid2 {
+  grid-template-columns: repeat(2, 1fr);
 }
 .grid-bottom {
   display: grid; grid-template-columns: 1.5fr 1fr; gap: 10px;

@@ -83,7 +83,8 @@ function updateSoundBtn() {
   const btn = document.getElementById("alert-sound-btn");
   const icon = btn.querySelector("i");
   btn.classList.toggle("muted", !alertSoundEnabled);
-  icon.className = alertSoundEnabled ? "ti ti-volume" : "ti ti-volume-off";
+  icon.classList.toggle("ti-volume", alertSoundEnabled);
+  icon.classList.toggle("ti-volume-off", !alertSoundEnabled);
 }
 
 // ==================== Smooth uptime clock ====================
@@ -667,8 +668,6 @@ function renderSnapshot(snap) {
   document.getElementById("m-type").textContent = device ? friendlyType(device.type) : "None";
   document.getElementById("m-driver").textContent = codec.driver === "Alt A2DP" ? "Alt A2DP" : (codec.driver === "Windows Standard" ? "Windows Standard Driver" : "System Driver");
   document.getElementById("m-driver-sub").textContent = codec.driver === "Alt A2DP" ? "LDAC/aptX unlocked" : (codec.driver === "Windows Standard" ? "SBC / AAC" : "PCM");
-  document.getElementById("m-stability").textContent = pfStab.textContent;
-  document.getElementById("m-stability-sub").textContent = pfStabSub.textContent;
 
   const preview = document.getElementById("output-preview");
   preview.innerHTML = "";
