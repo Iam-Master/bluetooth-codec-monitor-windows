@@ -32,7 +32,7 @@ Real-time Bluetooth audio codec monitor for Windows. See exactly which codec (SB
 
 ### Option 0: Download a Prebuilt Release
 
-Grab the latest standalone exe or installer from the [Releases page](https://github.com/Iam-Master/Codec-Monitor/releases) — no Python required.
+Grab the latest standalone exe or installer from the [Releases page](https://github.com/Iam-Master/bluetooth-codec-monitor-windows/releases) — no Python required.
 
 ### Option 1: Run from Source
 

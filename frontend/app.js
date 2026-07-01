@@ -231,7 +231,7 @@ function showHelpModal() {
     <p>Codec Monitor shows the real Bluetooth codec, bitrate, and sample rate your earbuds are using right now, read directly from Windows and the Alternative A2DP Driver registry — nothing here is guessed or hardcoded.</p>
     <p>Stock Windows only supports the SBC codec over Bluetooth. To unlock LDAC / aptX HD, install <strong>Alternative A2DP Driver</strong> from <code>bluetoothgoodies.com/a2dp/</code>.</p>
     <p><strong>Devices</strong> shows every paired device. <strong>Codecs</strong> explains each Bluetooth codec. <strong>Statistics</strong> shows long-term history. <strong>Alerts</strong> logs connect/disconnect/codec changes.</p>
-    <p>Found a bug or have an idea? <a href="#" onclick="window.pywebview.api.open_external('https://github.com/Iam-Master/Codec-Monitor'); return false;">Open an issue on GitHub</a>.</p>`);
+    <p>Found a bug or have an idea? <a href="#" onclick="window.pywebview.api.open_external('https://github.com/Iam-Master/bluetooth-codec-monitor-windows'); return false;">Open an issue on GitHub</a>.</p>`);
 }
 document.getElementById("help-btn").addEventListener("click", showHelpModal);
 
