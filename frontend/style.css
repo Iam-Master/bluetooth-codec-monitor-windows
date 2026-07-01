@@ -193,7 +193,6 @@ html, body {
   font-size: 16px; transition: background 0.1s;
 }
 .icon-btn:hover { background: var(--bg2); color: var(--txt); }
-.icon-btn.muted { color: var(--bad); opacity: 0.7; background: var(--bad-bg); }
 
 .theme2 {
   display: inline-flex;

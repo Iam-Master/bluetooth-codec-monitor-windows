@@ -45,7 +45,6 @@ let uptimeInterval = null;
 let lastDeviceName = null;
 let historyData = [];
 let alertsLog = [];
-let alertSoundEnabled = true;
 let wsConnected = false;
 let audioCtx = null;
 const chartInstances = {};
@@ -68,24 +67,6 @@ function applyTheme(t) {
   document.querySelectorAll(".theme2 button").forEach(b =>
     b.addEventListener("click", () => applyTheme(b.dataset.theme)));
 })();
-
-// ==================== Alert sound toggle ====================
-(function initAlertSound() {
-  try { alertSoundEnabled = localStorage.getItem("codecmon.sound") !== "off"; } catch {}
-  updateSoundBtn();
-  document.getElementById("alert-sound-btn").addEventListener("click", () => {
-    alertSoundEnabled = !alertSoundEnabled;
-    try { localStorage.setItem("codecmon.sound", alertSoundEnabled ? "on" : "off"); } catch {}
-    updateSoundBtn();
-  });
-})();
-function updateSoundBtn() {
-  const btn = document.getElementById("alert-sound-btn");
-  const icon = btn.querySelector("i");
-  btn.classList.toggle("muted", !alertSoundEnabled);
-  icon.classList.toggle("ti-volume", alertSoundEnabled);
-  icon.classList.toggle("ti-volume-off", !alertSoundEnabled);
-}
 
 // ==================== Smooth uptime clock ====================
 function fmtDuration(sec) {
@@ -132,7 +113,6 @@ function deviceSvg(type) {
 
 // ==================== Toast notifications ====================
 function playBeep() {
-  if (!alertSoundEnabled) return;
   try {
     if (!audioCtx) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
